@@ -7426,17 +7426,19 @@ html, body {
       }
     }
 
-    function drawHealthBar(e) {
+    function drawHealthBar(e, playerIdx) {
       var frac = U.clamp(e.hp / e.maxHp, 0, 1);
       if (frac >= 0.999 || frac <= 0) return;
       var p = Sim.entityPoint(e);
       var sx = Iso.sx(p.x, p.y);
       var sy = Iso.sy(p.x, p.y);
+      // 敌方血条用深红底衬，一眼区分敌我
+      var enemy = (playerIdx === undefined) ? false : (e.owner !== playerIdx);
       var top = e.kind === 'building'
         ? sy - Art.buildingSize(e.type).oy * 0.55 - 10
         : sy - 30;
       var w = e.kind === 'building' ? 34 : 20;
-      ctx.fillStyle = 'rgba(0,0,0,0.65)';
+      ctx.fillStyle = enemy ? 'rgba(60,0,0,0.75)' : 'rgba(0,0,0,0.65)';
       ctx.fillRect(sx - w / 2 - 1, top - 1, w + 2, 5);
       ctx.fillStyle = frac > 0.6 ? '#4ce05a' : (frac > 0.3 ? '#e8d24a' : '#e04a3a');
       ctx.fillRect(sx - w / 2, top, w * frac, 3);
@@ -7911,16 +7913,11 @@ html, body {
       // health bars are drawn above the fog so they stay readable
       for (i = 0; i < state.buildings.length; i++) {
         var b = state.buildings[i];
-        if (b.dead) continue;
-        if (b.owner !== playerIdx && !Sim.visibleAt(state, playerIdx, b.cx, b.cy)) continue;
-        if (view.showHealth === false && b.owner !== playerIdx) continue;
-        drawHealthBar(b);
+        if (Renderer.shouldDrawHealthBar(state, playerIdx, b, view.showHealth)) drawHealthBar(b, playerIdx);
       }
       for (i = 0; i < state.units.length; i++) {
         var u = state.units[i];
-        if (u.dead) continue;
-        if (u.owner !== playerIdx && !Sim.visibleAt(state, playerIdx, u.x, u.y)) continue;
-        if (u.owner === playerIdx || view.showHealth === false) drawHealthBar(u);
+        if (Renderer.shouldDrawHealthBar(state, playerIdx, u, view.showHealth)) drawHealthBar(u, playerIdx);
       }
       drawPlacementGhost(state, view);
       ctx.restore();
@@ -7960,6 +7957,20 @@ html, body {
         clampCamera(map);
       }
     };
+  };
+
+  /**
+   * 是否给这个目标画血条：
+   *  · 自己的单位/建筑 —— 受损时显示（满血不画，和原版一致）
+   *  · 敌方单位/建筑 —— 需要"显示敌方血条"打开，并且当前真的能看见它
+   * （之前这里判断写反了：开关打开时敌方单位反而不显示血条）
+   */
+  Renderer.shouldDrawHealthBar = function (state, playerIdx, e, showHealth) {
+    if (!e || e.dead) return false;
+    if (e.owner === playerIdx) return true;
+    if (showHealth === false) return false;
+    var p = Sim.entityPoint(e);
+    return Sim.visibleAt(state, playerIdx, p.x, p.y);
   };
 
   /** Cursor mode for the mouse (used by the input layer). */
