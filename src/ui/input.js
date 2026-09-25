@@ -26,6 +26,28 @@
     var panLast = null;
     var keys = {};
     var lastClickTime = -1e9;   // the very first click is never a double click
+
+    // 用 CSS 矢量光标代替"画在 canvas 里的光标"：由合成器绘制，永远跟手
+    var CURSOR_SVG = {
+      move: "<path d='M4 2 L4 19 L9 14 L12 21 L15 20 L12 13 L18 13 Z' fill='%23f2f8ff' stroke='%23101820' stroke-width='1.2'/>",
+      attack: "<circle cx='12' cy='12' r='7.5' fill='none' stroke='%23ff5a4a' stroke-width='2'/><path d='M12 2 L12 7 M12 17 L12 22 M2 12 L7 12 M17 12 L22 12' stroke='%23ff5a4a' stroke-width='2'/>",
+      harvest: "<circle cx='12' cy='12' r='7.5' fill='none' stroke='%23ffd85e' stroke-width='2'/><path d='M7 17 L17 7 M14 7 L17 7 L17 10' stroke='%23ffd85e' stroke-width='2' fill='none'/>",
+      capture: "<circle cx='12' cy='12' r='7.5' fill='none' stroke='%237cff9a' stroke-width='2'/><path d='M8 12 L16 12 M12 8 L12 16' stroke='%237cff9a' stroke-width='2'/>",
+      place: "<circle cx='12' cy='12' r='7' fill='none' stroke='%239dffb0' stroke-width='2'/><path d='M8 12 L16 12 M12 8 L12 16' stroke='%239dffb0' stroke-width='2'/>",
+      deploy: "<circle cx='12' cy='12' r='7.5' fill='none' stroke='%23ffb84a' stroke-width='2'/><path d='M12 4 L12 20 M4 12 L20 12' stroke='%23ffb84a' stroke-width='2'/>",
+      no: "<circle cx='12' cy='12' r='7.5' fill='none' stroke='%23ff6a5a' stroke-width='2'/><path d='M7 7 L17 17 M17 7 L7 17' stroke='%23ff6a5a' stroke-width='2'/>"
+    };
+    var lastCursorMode = '';
+    function cursorCss(mode) {
+      var art = CURSOR_SVG[mode] || CURSOR_SVG.move;
+      var svg = "<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24'>" + art + "</svg>";
+      return 'url("data:image/svg+xml;charset=utf8,' + svg.replace(/ /g, '%20') + '") 4 2, crosshair';
+    }
+    function setCursor(mode) {
+      if (mode === lastCursorMode) return;
+      lastCursorMode = mode;
+      canvas.style.cursor = cursorCss(mode);
+    }
     var attackMoveArmed = false;
     var edgeSpeed = 0;
 
@@ -262,6 +284,7 @@
       }
       view.cursor.mode = mode;
       view.cursor.color = color;
+      setCursor(mode);
       if (dragging && dragStart) {
         view.dragRect = {
           x: Math.min(dragStart.x, p.x), y: Math.min(dragStart.y, p.y),

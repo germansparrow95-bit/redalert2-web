@@ -28,6 +28,8 @@
   var shake = { t: 0, mag: 0 };
   var gameOverTimer = 0;
   var resultsShown = false;
+  // 自适应画质：帧内耗时偏高就自动降分辨率，空闲下来再升回去（防止低配机器"鼠标拖影"）
+  var perf = { workEma: 16, dprCap: 1.5, lastAdjust: 0, lowStreak: 0 };
   var reShow = null;               // re-renders whatever menu is currently open
   var settings = {
     volume: 0.6,
@@ -275,7 +277,7 @@
 
   function resizeCanvas() {
     var viewport = document.getElementById('viewport');
-    var dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    var dpr = Math.min(window.devicePixelRatio || 1, perf.dprCap);
     var vw = viewport.clientWidth || viewport.offsetWidth || (window.innerWidth - 232) || 960;
     var vh = viewport.clientHeight || viewport.offsetHeight || window.innerHeight || 600;
     var w = Math.max(320, Math.floor(vw * dpr));
@@ -294,6 +296,7 @@
     if (!running) return;
     var dt = Math.min(0.25, (now - lastTime) / 1000);
     lastTime = now;
+    var workStart = performance.now();
     if (!paused && state && !state.over) {
       accumulator += dt;
       var steps = 0;
@@ -320,10 +323,26 @@
       renderer.draw(state, view);
       cam.x = savedX; cam.y = savedY;
       hudTick++;
-      if (hudTick % 2 === 0) hud.update(state, view, dt * 2);
+      if (hudTick % 3 === 0) hud.update(state, view, dt * 3);   // 侧边栏 20Hz 更新足够
       if (state.over && !resultsShown) {
         gameOverTimer += dt;
         if (gameOverTimer > 1.8) showResults();
+      }
+    }
+    // ---- 自适应画质 ----
+    var work = performance.now() - workStart;
+    perf.workEma = perf.workEma * 0.88 + work * 0.12;
+    if (now - perf.lastAdjust > 2500) {
+      perf.lastAdjust = now;
+      if (perf.workEma > 15 && perf.dprCap > 0.8) {
+        perf.dprCap = perf.dprCap > 1 ? 1 : 0.8;
+        perf.lowStreak++;
+        resizeCanvas();
+        if (state && hud && perf.lowStreak === 1) hud.alert(RA.I18n.t('alert.lowSpec'), 'warn');
+      } else if (perf.workEma < 6.5 && perf.dprCap < 1.5) {
+        perf.lowStreak = 0;
+        perf.dprCap = Math.min(1.5, perf.dprCap + 0.25);
+        resizeCanvas();
       }
     }
     requestAnimationFrame(frame);

@@ -42,6 +42,12 @@
     var alerts = [];
     var minimap = null;
     var swButtons = {};
+    var swSignature = '';        // 超级武器面板的内容指纹，只有变化时才重建
+    var selSignature = '';
+    var lastCreditsText = '';
+    var lastPowerSig = '';
+    var lastTimerText = '';
+    var btnState = {};           // 每个建造按钮上次的 DOM 状态，避免每帧写 DOM
 
     /** Always work with the current game state (it changes between matches). */
     function sync() {
@@ -218,17 +224,22 @@
       var target = p.credits;
       if (Math.abs(displayCredits - target) < 1) displayCredits = target;
       else displayCredits += (target - displayCredits) * Math.min(1, dt * 6);
-      el.credits.textContent = U.formatMoney(displayCredits);
+      var creditText = U.formatMoney(displayCredits);
+      if (creditText !== lastCreditsText) { el.credits.textContent = creditText; lastCreditsText = creditText; }
       el.credits.classList.toggle('low', p.credits < 100);
 
       // power
       var produced = p.power.produced, consumed = p.power.consumed;
       var frac = produced <= 0 ? 0 : U.clamp(consumed / produced, 0, 1);
-      el.powerBar.style.width = (frac * 100).toFixed(0) + '%';
-      el.powerBar.parentNode.classList.toggle('overload', p.power.low);
       var net = produced - consumed;
-      el.powerText.textContent = (net >= 0 ? '+' : '') + net;
-      el.powerText.classList.toggle('bad', net < 0);
+      var powerSig = Math.round(frac * 100) + '|' + net + '|' + (p.power.low ? 1 : 0);
+      if (powerSig !== lastPowerSig) {
+        lastPowerSig = powerSig;
+        el.powerBar.style.width = (frac * 100).toFixed(0) + '%';
+        el.powerBar.parentNode.classList.toggle('overload', p.power.low);
+        el.powerText.textContent = (net >= 0 ? '+' : '') + net;
+        el.powerText.classList.toggle('bad', net < 0);
+      }
 
       // build buttons
       for (var id in buttons) {
@@ -236,14 +247,20 @@
         var qs = Sim.queueState(state, playerIdx, id);
         var check = Sim.canBuild(state, playerIdx, id);
         var node = b.node;
+        var pct = qs && !qs.item.ready
+          ? (U.clamp(qs.item.progress / b.def.buildTime, 0, 1) * 100).toFixed(0) : '0';
+        var st = (check.ok ? 'k' : 'l') + (check.ok && p.credits < b.def.cost && !qs ? 'u' : '') +
+          (qs ? (qs.item.ready ? 'R' : 'B') : '-') +
+          (p.placing && p.placing.typeId === id ? 'P' : '') + pct;
+        if (btnState[id] === st) continue;
+        btnState[id] = st;
         node.classList.toggle('locked', !check.ok && !qs);
         node.classList.toggle('unaffordable', check.ok && p.credits < b.def.cost && !qs);
         node.classList.toggle('building', !!qs && !qs.item.ready);
         node.classList.toggle('ready', !!qs && qs.item.ready);
         node.classList.toggle('placing', !!(p.placing && p.placing.typeId === id));
         if (qs && !qs.item.ready) {
-          var pct = U.clamp(qs.item.progress / b.def.buildTime, 0, 1) * 100;
-          b.progress.style.width = pct.toFixed(1) + '%';
+          b.progress.style.width = pct + '%';
           node.classList.add('showProgress');
         } else {
           b.progress.style.width = '0%';
@@ -255,7 +272,8 @@
       updateAlerts(dt);
 
       if (el.timer) {
-        el.timer.textContent = U.formatTime(state.tick, Rules.TICKS_PER_SEC);
+        var timerText = U.formatTime(state.tick, Rules.TICKS_PER_SEC);
+        if (timerText !== lastTimerText) { el.timer.textContent = timerText; lastTimerText = timerText; }
       }
       updateSuperPanel(state, view);
       if (el.faction) {
@@ -278,42 +296,61 @@
     function updateSuperPanel(state, view) {
       if (!el.superPanel) return;
       var list = Sim.superList(state, playerIdx);
-      el.superPanel.innerHTML = '';
-      swButtons = {};
-      for (var i = 0; i < list.length; i++) {
-        var s = list[i];
-        var b = document.createElement('button');
-        b.className = 'swBtn' + (s.ready ? ' ready' : '') +
-          (view && view.armingSuper && view.armingSuper.key === s.key ? ' aiming' : '');
-        b.dataset.swKey = s.key;
-        b.title = T('sw.' + s.key) + ' - ' + s.desc;
-        var icon = document.createElement('canvas');
-        icon.width = 40; icon.height = 30;
-        icon.className = 'swIcon';
-        var src = RA.Art.iconSprite(s.buildingType, state.players[playerIdx].colorId, 40, 30);
-        icon.getContext('2d').drawImage(src, 0, 0);
-        b.appendChild(icon);
-        var text = document.createElement('span');
-        text.className = 'swText';
-        var nm = document.createElement('span');
-        nm.className = 'swName';
-        nm.textContent = T('sw.' + s.key);
-        var pct = document.createElement('span');
-        pct.className = 'swPct';
-        pct.textContent = s.ready ? T('sw.ready') : Math.floor(s.charge / s.max * 100) + '%';
-        text.appendChild(nm);
-        text.appendChild(pct);
-        b.appendChild(text);
-        var bar = document.createElement('div');
-        bar.className = 'swBar';
-        var fill = document.createElement('i');
-        fill.style.width = U.clamp(s.charge / s.max, 0, 1) * 100 + '%';
-        bar.appendChild(fill);
-        b.appendChild(bar);
-        b.addEventListener('click', (function (key) {
-          return function () { if (opts.onSuperClick) opts.onSuperClick(key); };
-        })(s.key));
-        el.superPanel.appendChild(b);
+      // 内容指纹：只有"有哪些超级武器 / 是否就绪 / 瞄准中"变化时才重建 DOM，
+      // 其余时间只改百分比文字和进度条宽度（原来每帧重建 DOM + 新建 canvas，很卡）
+      var sig = '';
+      for (var si = 0; si < list.length; si++) {
+        sig += list[si].key + (list[si].ready ? '1' : '0') + (view && view.armingSuper &&
+          view.armingSuper.key === list[si].key ? 'A' : '') + '|';
+      }
+      if (sig !== swSignature) {
+        swSignature = sig;
+        el.superPanel.innerHTML = '';
+        swButtons = {};
+        for (var i = 0; i < list.length; i++) {
+          var s = list[i];
+          var b = document.createElement('button');
+          b.className = 'swBtn' + (s.ready ? ' ready' : '') +
+            (view && view.armingSuper && view.armingSuper.key === s.key ? ' aiming' : '');
+          b.dataset.swKey = s.key;
+          b.title = T('sw.' + s.key) + ' - ' + s.desc;
+          var icon = document.createElement('canvas');
+          icon.width = 40; icon.height = 30;
+          icon.className = 'swIcon';
+          var src = RA.Art.iconSprite(s.buildingType, state.players[playerIdx].colorId, 40, 30);
+          icon.getContext('2d').drawImage(src, 0, 0);
+          b.appendChild(icon);
+          var text = document.createElement('span');
+          text.className = 'swText';
+          var nm = document.createElement('span');
+          nm.className = 'swName';
+          nm.textContent = T('sw.' + s.key);
+          var pct = document.createElement('span');
+          pct.className = 'swPct';
+          text.appendChild(nm);
+          text.appendChild(pct);
+          b.appendChild(text);
+          var bar = document.createElement('div');
+          bar.className = 'swBar';
+          var fill = document.createElement('i');
+          bar.appendChild(fill);
+          b.appendChild(bar);
+          b.addEventListener('click', (function (key) {
+            return function () { if (opts.onSuperClick) opts.onSuperClick(key); };
+          })(s.key));
+          el.superPanel.appendChild(b);
+          swButtons[s.key] = { node: b, pct: pct, bar: fill, lastText: '', lastWidth: -1 };
+        }
+      }
+      // 只更新进度（变化很慢，写 DOM 的代价很低）
+      for (var k = 0; k < list.length; k++) {
+        var s2 = list[k];
+        var ref = swButtons[s2.key];
+        if (!ref) continue;
+        var text2 = s2.ready ? T('sw.ready') : Math.floor(s2.charge / s2.max * 100) + '%';
+        if (text2 !== ref.lastText) { ref.pct.textContent = text2; ref.lastText = text2; }
+        var w = Math.round(U.clamp(s2.charge / s2.max, 0, 1) * 100);
+        if (w !== ref.lastWidth) { ref.bar.style.width = w + '%'; ref.lastWidth = w; }
       }
     }
 
@@ -337,9 +374,24 @@
         if (e.kind === 'unit') units.push(e); else buildings.push(e);
       });
       if (!units.length && !buildings.length) {
-        el.selection.innerHTML = '<div class="selEmpty">' + T('hud.noSelection') + '</div>';
+        if (selSignature !== 'empty') {
+          selSignature = 'empty';
+          el.selection.innerHTML = '<div class="selEmpty">' + T('hud.noSelection') + '</div>';
+        }
         return;
       }
+      // 选择面板的内容指纹：血量/载矿/修理状态没变就不重写 innerHTML
+      var selSig = ids.join(',') + '|';
+      for (var si = 0; si < units.length; si++) {
+        selSig += units[si].id + ':' + Math.round(units[si].hp) + ':' + Math.round(units[si].cargo) +
+          ':' + units[si].rank + ';';
+      }
+      for (si = 0; si < buildings.length; si++) {
+        selSig += buildings[si].id + ':' + Math.round(buildings[si].hp) + ':' +
+          (buildings[si].repairing ? 1 : 0) + ';';
+      }
+      if (selSig === selSignature) return;
+      selSignature = selSig;
       var html = '';
       if (buildings.length === 1) {
         var b = buildings[0];

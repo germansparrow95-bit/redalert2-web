@@ -21,6 +21,34 @@
     var camera = { x: 0, y: 0, zoom: 1 };
     var viewW = canvas.width, viewH = canvas.height;
     var drawables = [];
+    var terrainLayer = null;      // 地形烘焙层（一次性画好，之后一次 drawImage 搞定）
+    var layerMapTag = -1;
+    var fogCache = { tickKey: -1, explored: new Float32Array(0), unseen: new Float32Array(0), nExp: 0, nUns: 0 };
+
+    /**
+     * 把整张地形烘焙到一张离屏画布上。原来每帧要画 2000 多块地砖，
+     * 现在只需要 1 次 drawImage —— 这是低配机器上最明显的提速。
+     * 地图过大（会超过 ~36MB）时自动放弃烘焙，退回逐格绘制。
+     */
+    function ensureTerrainLayer(state) {
+      if (terrainLayer && layerMapTag === state.map.tag) return terrainLayer;
+      layerMapTag = state.map.tag;
+      terrainLayer = null;
+      var map = state.map;
+      var b = Iso.mapBounds(map);
+      var w = Math.ceil(b.maxX - b.minX), h = Math.ceil(b.maxY);
+      if (w <= 0 || h <= 0 || w * h > 9000000) return null;
+      var c = Art.canvas(w, h);
+      var g = c.getContext('2d');
+      for (var y = 0; y < map.h; y++) {
+        for (var x = 0; x < map.w; x++) {
+          var spr = Art.tileSprite(map.terrain[y * map.w + x], (x * 7 + y * 13) % 4);
+          g.drawImage(spr, Math.round(Iso.sx(x, y) - Art.TILE_W / 2 - b.minX), Math.round(Iso.sy(x, y)));
+        }
+      }
+      terrainLayer = { canvas: c, minX: b.minX };
+      return terrainLayer;
+    }
 
     function screenToWorld(sx, sy) {
       return { x: sx / camera.zoom + camera.x, y: sy / camera.zoom + camera.y };
@@ -69,6 +97,21 @@
     function drawTerrain(state) {
       var map = state.map;
       var r = visibleRange(map);
+      var layer = ensureTerrainLayer(state);
+      if (layer) {
+        ctx.drawImage(layer.canvas, layer.minX, 0);
+        // 矿石是动态的（会被采掉），单独逐格画
+        for (var oy = r.y0; oy <= r.y1; oy++) {
+          for (var ox = r.x0; ox <= r.x1; ox++) {
+            var oi = oy * map.w + ox;
+            var ore = map.ore[oi];
+            if (ore <= 0) continue;
+            ctx.drawImage(Art.oreSprite(map.oreKind[oi] || 1, U.clamp(Math.ceil(ore / 50), 1, 6)),
+              Math.round(Iso.sx(ox, oy) - Art.TILE_W / 2), Math.round(Iso.sy(ox, oy)));
+          }
+        }
+        return;
+      }
       for (var y = r.y0; y <= r.y1; y++) {
         for (var x = r.x0; x <= r.x1; x++) {
           var i = y * map.w + x;
@@ -786,59 +829,11 @@
       ctx.restore();
     }
 
-    function drawCursor(view) {
-      if (!view || !view.cursor) return;
-      var c = view.cursor;
-      ctx.save();
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.strokeStyle = c.color || '#e0f4ff';
-      ctx.fillStyle = c.color || '#e0f4ff';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(c.x, c.y);
-      ctx.lineTo(c.x + 11, c.y + 12);
-      ctx.lineTo(c.x + 4, c.y + 12);
-      ctx.lineTo(c.x + 4, c.y + 17);
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-      if (c.mode && c.mode !== 'move') {
-        ctx.beginPath();
-        ctx.arc(c.x + 16, c.y + 16, 11, 0, Math.PI * 2);
-        ctx.stroke();
-        if (c.mode === 'attack') {
-          ctx.beginPath();
-          ctx.moveTo(c.x + 8, c.y + 16);
-          ctx.lineTo(c.x + 24, c.y + 16);
-          ctx.moveTo(c.x + 16, c.y + 8);
-          ctx.lineTo(c.x + 16, c.y + 24);
-          ctx.stroke();
-        } else if (c.mode === 'no') {
-          ctx.beginPath();
-          ctx.moveTo(c.x + 9, c.y + 9);
-          ctx.lineTo(c.x + 23, c.y + 23);
-          ctx.moveTo(c.x + 23, c.y + 9);
-          ctx.lineTo(c.x + 9, c.y + 23);
-          ctx.stroke();
-        } else if (c.mode === 'harvest') {
-          ctx.beginPath();
-          ctx.moveTo(c.x + 10, c.y + 22);
-          ctx.lineTo(c.x + 22, c.y + 10);
-          ctx.moveTo(c.x + 18, c.y + 10);
-          ctx.lineTo(c.x + 22, c.y + 10);
-          ctx.lineTo(c.x + 22, c.y + 14);
-          ctx.stroke();
-        } else if (c.mode === 'capture') {
-          ctx.beginPath();
-          ctx.moveTo(c.x + 16, c.y + 9);
-          ctx.lineTo(c.x + 16, c.y + 23);
-          ctx.moveTo(c.x + 9, c.y + 16);
-          ctx.lineTo(c.x + 23, c.y + 16);
-          ctx.stroke();
-        }
-      }
-      ctx.restore();
-    }
+    /**
+     * 光标现在由 CSS 绘制（见 input.js 的 setCursor），不再画在画布上——
+     * 画在画布上的光标会跟着帧率走，鼠标一动就"拖影"。
+     */
+    function drawCursor() { /* 保留空实现，方便以后加准星特效 */ }
 
     // -------------------------------------------------------------------
     // Main draw

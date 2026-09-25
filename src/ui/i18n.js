@@ -162,6 +162,7 @@
       'alert.aimTarget': '请点击传送目的地',
       'alert.superAim': '请点击目标位置',
       'alert.superCharging': '{name} 还在充能中',
+      'alert.lowSpec': '帧率偏低，已自动降低渲染分辨率（可从设置里恢复）。',
 
       'alert.underAttack': '指挥官，基地遭到攻击！',
       'alert.lowPower': '电力不足：防御停机、建造减速！',
@@ -350,6 +351,7 @@
       'alert.aimTarget': 'Click the teleport destination',
       'alert.superAim': 'Click the target position',
       'alert.superCharging': '{name} is still charging',
+      'alert.lowSpec': 'Low frame rate detected - render resolution reduced.',
 
       'alert.underAttack': 'Our base is under attack',
       'alert.lowPower': 'Low power - defences offline, building slowed',

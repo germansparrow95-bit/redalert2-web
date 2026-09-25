@@ -45,7 +45,8 @@ html, body {
   display: block;
   width: 100%;
   height: 100%;
-  cursor: none;
+  /* 光标用系统指针（CSS 矢量光标），不再画在 canvas 上 —— 这样它不跟着帧率走 */
+  cursor: default;
 }
 
 /* ---------------------------------------------------------------- top bar */

@@ -53,7 +53,8 @@ html, body {
   display: block;
   width: 100%;
   height: 100%;
-  cursor: none;
+  /* 光标用系统指针（CSS 矢量光标），不再画在 canvas 上 —— 这样它不跟着帧率走 */
+  cursor: default;
 }
 
 /* ---------------------------------------------------------------- top bar */
@@ -7058,6 +7059,34 @@ html, body {
     var camera = { x: 0, y: 0, zoom: 1 };
     var viewW = canvas.width, viewH = canvas.height;
     var drawables = [];
+    var terrainLayer = null;      // 地形烘焙层（一次性画好，之后一次 drawImage 搞定）
+    var layerMapTag = -1;
+    var fogCache = { tickKey: -1, explored: new Float32Array(0), unseen: new Float32Array(0), nExp: 0, nUns: 0 };
+
+    /**
+     * 把整张地形烘焙到一张离屏画布上。原来每帧要画 2000 多块地砖，
+     * 现在只需要 1 次 drawImage —— 这是低配机器上最明显的提速。
+     * 地图过大（会超过 ~36MB）时自动放弃烘焙，退回逐格绘制。
+     */
+    function ensureTerrainLayer(state) {
+      if (terrainLayer && layerMapTag === state.map.tag) return terrainLayer;
+      layerMapTag = state.map.tag;
+      terrainLayer = null;
+      var map = state.map;
+      var b = Iso.mapBounds(map);
+      var w = Math.ceil(b.maxX - b.minX), h = Math.ceil(b.maxY);
+      if (w <= 0 || h <= 0 || w * h > 9000000) return null;
+      var c = Art.canvas(w, h);
+      var g = c.getContext('2d');
+      for (var y = 0; y < map.h; y++) {
+        for (var x = 0; x < map.w; x++) {
+          var spr = Art.tileSprite(map.terrain[y * map.w + x], (x * 7 + y * 13) % 4);
+          g.drawImage(spr, Math.round(Iso.sx(x, y) - Art.TILE_W / 2 - b.minX), Math.round(Iso.sy(x, y)));
+        }
+      }
+      terrainLayer = { canvas: c, minX: b.minX };
+      return terrainLayer;
+    }
 
     function screenToWorld(sx, sy) {
       return { x: sx / camera.zoom + camera.x, y: sy / camera.zoom + camera.y };
@@ -7106,6 +7135,21 @@ html, body {
     function drawTerrain(state) {
       var map = state.map;
       var r = visibleRange(map);
+      var layer = ensureTerrainLayer(state);
+      if (layer) {
+        ctx.drawImage(layer.canvas, layer.minX, 0);
+        // 矿石是动态的（会被采掉），单独逐格画
+        for (var oy = r.y0; oy <= r.y1; oy++) {
+          for (var ox = r.x0; ox <= r.x1; ox++) {
+            var oi = oy * map.w + ox;
+            var ore = map.ore[oi];
+            if (ore <= 0) continue;
+            ctx.drawImage(Art.oreSprite(map.oreKind[oi] || 1, U.clamp(Math.ceil(ore / 50), 1, 6)),
+              Math.round(Iso.sx(ox, oy) - Art.TILE_W / 2), Math.round(Iso.sy(ox, oy)));
+          }
+        }
+        return;
+      }
       for (var y = r.y0; y <= r.y1; y++) {
         for (var x = r.x0; x <= r.x1; x++) {
           var i = y * map.w + x;
@@ -7823,59 +7867,11 @@ html, body {
       ctx.restore();
     }
 
-    function drawCursor(view) {
-      if (!view || !view.cursor) return;
-      var c = view.cursor;
-      ctx.save();
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.strokeStyle = c.color || '#e0f4ff';
-      ctx.fillStyle = c.color || '#e0f4ff';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(c.x, c.y);
-      ctx.lineTo(c.x + 11, c.y + 12);
-      ctx.lineTo(c.x + 4, c.y + 12);
-      ctx.lineTo(c.x + 4, c.y + 17);
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-      if (c.mode && c.mode !== 'move') {
-        ctx.beginPath();
-        ctx.arc(c.x + 16, c.y + 16, 11, 0, Math.PI * 2);
-        ctx.stroke();
-        if (c.mode === 'attack') {
-          ctx.beginPath();
-          ctx.moveTo(c.x + 8, c.y + 16);
-          ctx.lineTo(c.x + 24, c.y + 16);
-          ctx.moveTo(c.x + 16, c.y + 8);
-          ctx.lineTo(c.x + 16, c.y + 24);
-          ctx.stroke();
-        } else if (c.mode === 'no') {
-          ctx.beginPath();
-          ctx.moveTo(c.x + 9, c.y + 9);
-          ctx.lineTo(c.x + 23, c.y + 23);
-          ctx.moveTo(c.x + 23, c.y + 9);
-          ctx.lineTo(c.x + 9, c.y + 23);
-          ctx.stroke();
-        } else if (c.mode === 'harvest') {
-          ctx.beginPath();
-          ctx.moveTo(c.x + 10, c.y + 22);
-          ctx.lineTo(c.x + 22, c.y + 10);
-          ctx.moveTo(c.x + 18, c.y + 10);
-          ctx.lineTo(c.x + 22, c.y + 10);
-          ctx.lineTo(c.x + 22, c.y + 14);
-          ctx.stroke();
-        } else if (c.mode === 'capture') {
-          ctx.beginPath();
-          ctx.moveTo(c.x + 16, c.y + 9);
-          ctx.lineTo(c.x + 16, c.y + 23);
-          ctx.moveTo(c.x + 9, c.y + 16);
-          ctx.lineTo(c.x + 23, c.y + 16);
-          ctx.stroke();
-        }
-      }
-      ctx.restore();
-    }
+    /**
+     * 光标现在由 CSS 绘制（见 input.js 的 setCursor），不再画在画布上——
+     * 画在画布上的光标会跟着帧率走，鼠标一动就"拖影"。
+     */
+    function drawCursor() { /* 保留空实现，方便以后加准星特效 */ }
 
     // -------------------------------------------------------------------
     // Main draw
@@ -8852,6 +8848,7 @@ html, body {
       'alert.aimTarget': '请点击传送目的地',
       'alert.superAim': '请点击目标位置',
       'alert.superCharging': '{name} 还在充能中',
+      'alert.lowSpec': '帧率偏低，已自动降低渲染分辨率（可从设置里恢复）。',
 
       'alert.underAttack': '指挥官，基地遭到攻击！',
       'alert.lowPower': '电力不足：防御停机、建造减速！',
@@ -9040,6 +9037,7 @@ html, body {
       'alert.aimTarget': 'Click the teleport destination',
       'alert.superAim': 'Click the target position',
       'alert.superCharging': '{name} is still charging',
+      'alert.lowSpec': 'Low frame rate detected - render resolution reduced.',
 
       'alert.underAttack': 'Our base is under attack',
       'alert.lowPower': 'Low power - defences offline, building slowed',
@@ -9308,6 +9306,12 @@ html, body {
     var alerts = [];
     var minimap = null;
     var swButtons = {};
+    var swSignature = '';        // 超级武器面板的内容指纹，只有变化时才重建
+    var selSignature = '';
+    var lastCreditsText = '';
+    var lastPowerSig = '';
+    var lastTimerText = '';
+    var btnState = {};           // 每个建造按钮上次的 DOM 状态，避免每帧写 DOM
 
     /** Always work with the current game state (it changes between matches). */
     function sync() {
@@ -9484,17 +9488,22 @@ html, body {
       var target = p.credits;
       if (Math.abs(displayCredits - target) < 1) displayCredits = target;
       else displayCredits += (target - displayCredits) * Math.min(1, dt * 6);
-      el.credits.textContent = U.formatMoney(displayCredits);
+      var creditText = U.formatMoney(displayCredits);
+      if (creditText !== lastCreditsText) { el.credits.textContent = creditText; lastCreditsText = creditText; }
       el.credits.classList.toggle('low', p.credits < 100);
 
       // power
       var produced = p.power.produced, consumed = p.power.consumed;
       var frac = produced <= 0 ? 0 : U.clamp(consumed / produced, 0, 1);
-      el.powerBar.style.width = (frac * 100).toFixed(0) + '%';
-      el.powerBar.parentNode.classList.toggle('overload', p.power.low);
       var net = produced - consumed;
-      el.powerText.textContent = (net >= 0 ? '+' : '') + net;
-      el.powerText.classList.toggle('bad', net < 0);
+      var powerSig = Math.round(frac * 100) + '|' + net + '|' + (p.power.low ? 1 : 0);
+      if (powerSig !== lastPowerSig) {
+        lastPowerSig = powerSig;
+        el.powerBar.style.width = (frac * 100).toFixed(0) + '%';
+        el.powerBar.parentNode.classList.toggle('overload', p.power.low);
+        el.powerText.textContent = (net >= 0 ? '+' : '') + net;
+        el.powerText.classList.toggle('bad', net < 0);
+      }
 
       // build buttons
       for (var id in buttons) {
@@ -9502,14 +9511,20 @@ html, body {
         var qs = Sim.queueState(state, playerIdx, id);
         var check = Sim.canBuild(state, playerIdx, id);
         var node = b.node;
+        var pct = qs && !qs.item.ready
+          ? (U.clamp(qs.item.progress / b.def.buildTime, 0, 1) * 100).toFixed(0) : '0';
+        var st = (check.ok ? 'k' : 'l') + (check.ok && p.credits < b.def.cost && !qs ? 'u' : '') +
+          (qs ? (qs.item.ready ? 'R' : 'B') : '-') +
+          (p.placing && p.placing.typeId === id ? 'P' : '') + pct;
+        if (btnState[id] === st) continue;
+        btnState[id] = st;
         node.classList.toggle('locked', !check.ok && !qs);
         node.classList.toggle('unaffordable', check.ok && p.credits < b.def.cost && !qs);
         node.classList.toggle('building', !!qs && !qs.item.ready);
         node.classList.toggle('ready', !!qs && qs.item.ready);
         node.classList.toggle('placing', !!(p.placing && p.placing.typeId === id));
         if (qs && !qs.item.ready) {
-          var pct = U.clamp(qs.item.progress / b.def.buildTime, 0, 1) * 100;
-          b.progress.style.width = pct.toFixed(1) + '%';
+          b.progress.style.width = pct + '%';
           node.classList.add('showProgress');
         } else {
           b.progress.style.width = '0%';
@@ -9521,7 +9536,8 @@ html, body {
       updateAlerts(dt);
 
       if (el.timer) {
-        el.timer.textContent = U.formatTime(state.tick, Rules.TICKS_PER_SEC);
+        var timerText = U.formatTime(state.tick, Rules.TICKS_PER_SEC);
+        if (timerText !== lastTimerText) { el.timer.textContent = timerText; lastTimerText = timerText; }
       }
       updateSuperPanel(state, view);
       if (el.faction) {
@@ -9544,42 +9560,61 @@ html, body {
     function updateSuperPanel(state, view) {
       if (!el.superPanel) return;
       var list = Sim.superList(state, playerIdx);
-      el.superPanel.innerHTML = '';
-      swButtons = {};
-      for (var i = 0; i < list.length; i++) {
-        var s = list[i];
-        var b = document.createElement('button');
-        b.className = 'swBtn' + (s.ready ? ' ready' : '') +
-          (view && view.armingSuper && view.armingSuper.key === s.key ? ' aiming' : '');
-        b.dataset.swKey = s.key;
-        b.title = T('sw.' + s.key) + ' - ' + s.desc;
-        var icon = document.createElement('canvas');
-        icon.width = 40; icon.height = 30;
-        icon.className = 'swIcon';
-        var src = RA.Art.iconSprite(s.buildingType, state.players[playerIdx].colorId, 40, 30);
-        icon.getContext('2d').drawImage(src, 0, 0);
-        b.appendChild(icon);
-        var text = document.createElement('span');
-        text.className = 'swText';
-        var nm = document.createElement('span');
-        nm.className = 'swName';
-        nm.textContent = T('sw.' + s.key);
-        var pct = document.createElement('span');
-        pct.className = 'swPct';
-        pct.textContent = s.ready ? T('sw.ready') : Math.floor(s.charge / s.max * 100) + '%';
-        text.appendChild(nm);
-        text.appendChild(pct);
-        b.appendChild(text);
-        var bar = document.createElement('div');
-        bar.className = 'swBar';
-        var fill = document.createElement('i');
-        fill.style.width = U.clamp(s.charge / s.max, 0, 1) * 100 + '%';
-        bar.appendChild(fill);
-        b.appendChild(bar);
-        b.addEventListener('click', (function (key) {
-          return function () { if (opts.onSuperClick) opts.onSuperClick(key); };
-        })(s.key));
-        el.superPanel.appendChild(b);
+      // 内容指纹：只有"有哪些超级武器 / 是否就绪 / 瞄准中"变化时才重建 DOM，
+      // 其余时间只改百分比文字和进度条宽度（原来每帧重建 DOM + 新建 canvas，很卡）
+      var sig = '';
+      for (var si = 0; si < list.length; si++) {
+        sig += list[si].key + (list[si].ready ? '1' : '0') + (view && view.armingSuper &&
+          view.armingSuper.key === list[si].key ? 'A' : '') + '|';
+      }
+      if (sig !== swSignature) {
+        swSignature = sig;
+        el.superPanel.innerHTML = '';
+        swButtons = {};
+        for (var i = 0; i < list.length; i++) {
+          var s = list[i];
+          var b = document.createElement('button');
+          b.className = 'swBtn' + (s.ready ? ' ready' : '') +
+            (view && view.armingSuper && view.armingSuper.key === s.key ? ' aiming' : '');
+          b.dataset.swKey = s.key;
+          b.title = T('sw.' + s.key) + ' - ' + s.desc;
+          var icon = document.createElement('canvas');
+          icon.width = 40; icon.height = 30;
+          icon.className = 'swIcon';
+          var src = RA.Art.iconSprite(s.buildingType, state.players[playerIdx].colorId, 40, 30);
+          icon.getContext('2d').drawImage(src, 0, 0);
+          b.appendChild(icon);
+          var text = document.createElement('span');
+          text.className = 'swText';
+          var nm = document.createElement('span');
+          nm.className = 'swName';
+          nm.textContent = T('sw.' + s.key);
+          var pct = document.createElement('span');
+          pct.className = 'swPct';
+          text.appendChild(nm);
+          text.appendChild(pct);
+          b.appendChild(text);
+          var bar = document.createElement('div');
+          bar.className = 'swBar';
+          var fill = document.createElement('i');
+          bar.appendChild(fill);
+          b.appendChild(bar);
+          b.addEventListener('click', (function (key) {
+            return function () { if (opts.onSuperClick) opts.onSuperClick(key); };
+          })(s.key));
+          el.superPanel.appendChild(b);
+          swButtons[s.key] = { node: b, pct: pct, bar: fill, lastText: '', lastWidth: -1 };
+        }
+      }
+      // 只更新进度（变化很慢，写 DOM 的代价很低）
+      for (var k = 0; k < list.length; k++) {
+        var s2 = list[k];
+        var ref = swButtons[s2.key];
+        if (!ref) continue;
+        var text2 = s2.ready ? T('sw.ready') : Math.floor(s2.charge / s2.max * 100) + '%';
+        if (text2 !== ref.lastText) { ref.pct.textContent = text2; ref.lastText = text2; }
+        var w = Math.round(U.clamp(s2.charge / s2.max, 0, 1) * 100);
+        if (w !== ref.lastWidth) { ref.bar.style.width = w + '%'; ref.lastWidth = w; }
       }
     }
 
@@ -9603,9 +9638,24 @@ html, body {
         if (e.kind === 'unit') units.push(e); else buildings.push(e);
       });
       if (!units.length && !buildings.length) {
-        el.selection.innerHTML = '<div class="selEmpty">' + T('hud.noSelection') + '</div>';
+        if (selSignature !== 'empty') {
+          selSignature = 'empty';
+          el.selection.innerHTML = '<div class="selEmpty">' + T('hud.noSelection') + '</div>';
+        }
         return;
       }
+      // 选择面板的内容指纹：血量/载矿/修理状态没变就不重写 innerHTML
+      var selSig = ids.join(',') + '|';
+      for (var si = 0; si < units.length; si++) {
+        selSig += units[si].id + ':' + Math.round(units[si].hp) + ':' + Math.round(units[si].cargo) +
+          ':' + units[si].rank + ';';
+      }
+      for (si = 0; si < buildings.length; si++) {
+        selSig += buildings[si].id + ':' + Math.round(buildings[si].hp) + ':' +
+          (buildings[si].repairing ? 1 : 0) + ';';
+      }
+      if (selSig === selSignature) return;
+      selSignature = selSig;
       var html = '';
       if (buildings.length === 1) {
         var b = buildings[0];
@@ -9730,6 +9780,28 @@ html, body {
     var panLast = null;
     var keys = {};
     var lastClickTime = -1e9;   // the very first click is never a double click
+
+    // 用 CSS 矢量光标代替"画在 canvas 里的光标"：由合成器绘制，永远跟手
+    var CURSOR_SVG = {
+      move: "<path d='M4 2 L4 19 L9 14 L12 21 L15 20 L12 13 L18 13 Z' fill='%23f2f8ff' stroke='%23101820' stroke-width='1.2'/>",
+      attack: "<circle cx='12' cy='12' r='7.5' fill='none' stroke='%23ff5a4a' stroke-width='2'/><path d='M12 2 L12 7 M12 17 L12 22 M2 12 L7 12 M17 12 L22 12' stroke='%23ff5a4a' stroke-width='2'/>",
+      harvest: "<circle cx='12' cy='12' r='7.5' fill='none' stroke='%23ffd85e' stroke-width='2'/><path d='M7 17 L17 7 M14 7 L17 7 L17 10' stroke='%23ffd85e' stroke-width='2' fill='none'/>",
+      capture: "<circle cx='12' cy='12' r='7.5' fill='none' stroke='%237cff9a' stroke-width='2'/><path d='M8 12 L16 12 M12 8 L12 16' stroke='%237cff9a' stroke-width='2'/>",
+      place: "<circle cx='12' cy='12' r='7' fill='none' stroke='%239dffb0' stroke-width='2'/><path d='M8 12 L16 12 M12 8 L12 16' stroke='%239dffb0' stroke-width='2'/>",
+      deploy: "<circle cx='12' cy='12' r='7.5' fill='none' stroke='%23ffb84a' stroke-width='2'/><path d='M12 4 L12 20 M4 12 L20 12' stroke='%23ffb84a' stroke-width='2'/>",
+      no: "<circle cx='12' cy='12' r='7.5' fill='none' stroke='%23ff6a5a' stroke-width='2'/><path d='M7 7 L17 17 M17 7 L7 17' stroke='%23ff6a5a' stroke-width='2'/>"
+    };
+    var lastCursorMode = '';
+    function cursorCss(mode) {
+      var art = CURSOR_SVG[mode] || CURSOR_SVG.move;
+      var svg = "<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24'>" + art + "</svg>";
+      return 'url("data:image/svg+xml;charset=utf8,' + svg.replace(/ /g, '%20') + '") 4 2, crosshair';
+    }
+    function setCursor(mode) {
+      if (mode === lastCursorMode) return;
+      lastCursorMode = mode;
+      canvas.style.cursor = cursorCss(mode);
+    }
     var attackMoveArmed = false;
     var edgeSpeed = 0;
 
@@ -9966,6 +10038,7 @@ html, body {
       }
       view.cursor.mode = mode;
       view.cursor.color = color;
+      setCursor(mode);
       if (dragging && dragStart) {
         view.dragRect = {
           x: Math.min(dragStart.x, p.x), y: Math.min(dragStart.y, p.y),
@@ -10605,6 +10678,8 @@ html, body {
   var shake = { t: 0, mag: 0 };
   var gameOverTimer = 0;
   var resultsShown = false;
+  // 自适应画质：帧内耗时偏高就自动降分辨率，空闲下来再升回去（防止低配机器"鼠标拖影"）
+  var perf = { workEma: 16, dprCap: 1.5, lastAdjust: 0, lowStreak: 0 };
   var reShow = null;               // re-renders whatever menu is currently open
   var settings = {
     volume: 0.6,
@@ -10852,7 +10927,7 @@ html, body {
 
   function resizeCanvas() {
     var viewport = document.getElementById('viewport');
-    var dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    var dpr = Math.min(window.devicePixelRatio || 1, perf.dprCap);
     var vw = viewport.clientWidth || viewport.offsetWidth || (window.innerWidth - 232) || 960;
     var vh = viewport.clientHeight || viewport.offsetHeight || window.innerHeight || 600;
     var w = Math.max(320, Math.floor(vw * dpr));
@@ -10871,6 +10946,7 @@ html, body {
     if (!running) return;
     var dt = Math.min(0.25, (now - lastTime) / 1000);
     lastTime = now;
+    var workStart = performance.now();
     if (!paused && state && !state.over) {
       accumulator += dt;
       var steps = 0;
@@ -10897,10 +10973,26 @@ html, body {
       renderer.draw(state, view);
       cam.x = savedX; cam.y = savedY;
       hudTick++;
-      if (hudTick % 2 === 0) hud.update(state, view, dt * 2);
+      if (hudTick % 3 === 0) hud.update(state, view, dt * 3);   // 侧边栏 20Hz 更新足够
       if (state.over && !resultsShown) {
         gameOverTimer += dt;
         if (gameOverTimer > 1.8) showResults();
+      }
+    }
+    // ---- 自适应画质 ----
+    var work = performance.now() - workStart;
+    perf.workEma = perf.workEma * 0.88 + work * 0.12;
+    if (now - perf.lastAdjust > 2500) {
+      perf.lastAdjust = now;
+      if (perf.workEma > 15 && perf.dprCap > 0.8) {
+        perf.dprCap = perf.dprCap > 1 ? 1 : 0.8;
+        perf.lowStreak++;
+        resizeCanvas();
+        if (state && hud && perf.lowStreak === 1) hud.alert(RA.I18n.t('alert.lowSpec'), 'warn');
+      } else if (perf.workEma < 6.5 && perf.dprCap < 1.5) {
+        perf.lowStreak = 0;
+        perf.dprCap = Math.min(1.5, perf.dprCap + 0.25);
+        resizeCanvas();
       }
     }
     requestAnimationFrame(frame);
