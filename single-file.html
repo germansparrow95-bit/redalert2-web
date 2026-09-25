@@ -1328,6 +1328,8 @@ html, body {
   Rules.GEM_MULTIPLIER = 2;       // gems are worth double
   Rules.ORE_REGROW_TICKS = 26;    // ticks per +1 credit of regrowth
   Rules.SELL_REFUND = 0.5;
+  /** 建筑必须建在自己基地多少格范围内（0 = 必须紧贴，默认 5 格比较宽松）。 */
+  Rules.BUILD_RADIUS = 5;
   Rules.REPAIR_RATE = 0.6;        // hp per tick
   Rules.REPAIR_COST_PER_HP = 0.25;
   Rules.CAPTURE_HP_FRACTION = 0.5;
@@ -3197,21 +3199,17 @@ html, body {
         if (map.ore[i] > 0) return { ok: false, reason: 'Cannot build on ore', reasonKey: 'ore' };
       }
     }
-    // must touch (or be very close to) an existing friendly structure
-    var touching = false;
-    for (y = -1; y <= def.h && !touching; y++) {
-      for (x = -1; x <= def.w; x++) {
-        if (x >= 0 && x < def.w && y >= 0 && y < def.h) continue;
-        var bx = tx + x, by = ty + y;
-        if (!map.inside(bx, by)) continue;
-        if (map.occ[map.idx(bx, by)]) {
-          var owner = buildingOwnerAt(state, bx, by);
-          if (owner === playerIdx) { touching = true; break; }
-        }
-      }
+    // 只要在自己基地范围内就能放：离任一自有建筑的格子间距 <= BUILD_RADIUS
+    // （默认 5 格，不需要紧贴；想改规则只改 Rules.BUILD_RADIUS）
+    var bestGap = 999;
+    for (var bi = 0; bi < state.buildings.length; bi++) {
+      var ob = state.buildings[bi];
+      if (ob.dead || ob.owner !== playerIdx) continue;
+      var gap = rectGap(tx, ty, def.w, def.h, ob.x, ob.y, ob.w, ob.h);
+      if (gap < bestGap) bestGap = gap;
     }
-    if (!touching) {
-      return { ok: false, reason: 'Must be built next to your base', reasonKey: 'notAdjacent' };
+    if (bestGap > Rules.BUILD_RADIUS) {
+      return { ok: false, reason: 'Too far from your base', reasonKey: 'tooFar', gap: bestGap };
     }
     // Never drop a building on top of units - that would trap them.
     var boxR = Math.max(def.w, def.h) * 0.75 + 1;
@@ -3235,6 +3233,14 @@ html, body {
     }
     return -1;
   }
+
+  /** 两个矩形（格子）之间的 Chebyshev 间距：相邻或重叠时为 0。 */
+  function rectGap(ax, ay, aw, ah, bx, by, bw, bh) {
+    var dx = Math.max(bx - (ax + aw - 1), ax - (bx + bw - 1), 0);
+    var dy = Math.max(by - (ay + ah - 1), ay - (by + bh - 1), 0);
+    return Math.max(dx, dy);
+  }
+  Sim.rectGap = rectGap;
 
   Sim.placeBuilding = function (state, playerIdx, typeId, tx, ty) {
     var check = Sim.canPlace(state, playerIdx, typeId, tx, ty);
@@ -4866,6 +4872,16 @@ html, body {
     var wantMiners = (p.difficulty === 'easy' ? 2 : (p.difficulty === 'hard' ? 5 : 3)) + Math.max(0, refineries - 1);
     if (miners < wantMiners && factories > 0 && queue(state, p, minerType(p))) return;
 
+    // 科技优先于"锦上添花"的建筑：有钱先上作战实验室和超级武器，
+    // 否则钱会被防御/精炼器花掉，永远攒不出实验室（曾经导致 AI 不再出兵）
+    if (labs < 1 && p.credits > 3400 && queue(state, p, 'lab')) return;
+    if (labs > 0 && p.credits > 3200) {
+      var sw = superTypes(p);
+      for (var si = 0; si < sw.length; si++) {
+        if (queue(state, p, sw[si])) return;
+      }
+    }
+
     // 雷达站：原版里没雷达就没有小地图，AI 也会尽早补上
     if (buildingCount(state, p, radarType(p)) === 0 && p.credits > 1500 && miners >= 2 &&
       queue(state, p, radarType(p))) return;
@@ -4874,21 +4890,11 @@ html, body {
 
     if (refineries < 2 && p.credits > 3200 && queue(state, p, 'refinery')) return;
     if (factories < 2 && p.credits > 4000 && queue(state, p, 'warfactory')) return;
-    if (labs < 1 && p.credits > 3400 && queue(state, p, 'lab')) return;
-
     // 矿石精炼器（+25% 收益）与维修厂
     if (buildingCount(state, p, 'ore_purifier') === 0 && p.credits > 3200 &&
       queue(state, p, 'ore_purifier')) return;
     if (buildingCount(state, p, 'service_depot') === 0 && factories > 0 &&
       p.credits > 2000 && queue(state, p, 'service_depot')) return;
-
-    // 超级武器：一旦有作战实验室就抢建
-    if (labs > 0 && p.credits > 3200) {
-      var sw = superTypes(p);
-      for (var si = 0; si < sw.length; si++) {
-        if (queue(state, p, sw[si])) return;
-      }
-    }
 
     // 防空：发现敌方空军就补防空
     if (enemyAirCount(state, p) > 0 && !hasReadyOrQueued(state, p, aatype(p)) &&
@@ -4950,8 +4956,16 @@ html, body {
     for (var swi = 0; swi < swTypes.length; swi++) swCount += buildingCount(state, p, swTypes[swi]);
     var hasProducer = producerCount(state, p, 'vehicle') > 0;
     if (hasProducer) {
-      if (labCount === 0 && !hasReadyOrQueued(state, p, 'lab') && army >= 6 && p.credits < 3600) return;
-      if (labCount > 0 && swCount === 0 && army >= 8 && p.credits < 3400) return;
+      var hold = false;
+      if (labCount === 0 && !hasReadyOrQueued(state, p, 'lab') && army >= 6 && p.credits < 3600) hold = true;
+      if (labCount > 0 && swCount === 0 && army >= 8 && p.credits < 3400) hold = true;
+      // 保险：最多攒 60 秒，超时就照常出兵，避免把自己憋死
+      if (hold) {
+        if (!p.ai.holdSince) p.ai.holdSince = state.tick;
+        if (state.tick - p.ai.holdSince < 60 * HZ2()) return;
+      } else {
+        p.ai.holdSince = 0;
+      }
     }
 
     var diff = Rules.DIFFICULTIES[p.difficulty];
@@ -5828,26 +5842,142 @@ html, body {
    */
   function chassisSpec(type) {
     switch (type) {
-      case 'grizzly': return { len: 1.05, wid: 0.86, hull: 13, turretLen: 0.5, turretWid: 0.46, barrel: 0.5, barrels: 1 };
-      case 'rhino': return { len: 1.18, wid: 0.94, hull: 16, turretLen: 0.6, turretWid: 0.56, barrel: 0.56, barrels: 1 };
-      case 'apoc': return { len: 1.4, wid: 1.05, hull: 19, turretLen: 0.72, turretWid: 0.68, barrel: 0.6, barrels: 2, missiles: true };
-      case 'prismtank': return { len: 1.1, wid: 0.86, hull: 13, turretLen: 0.44, turretWid: 0.54, barrel: 0.18, barrels: 1, prism: true };
-      case 'ifv': return { len: 0.92, wid: 0.72, hull: 9, turretLen: 0.34, turretWid: 0.34, barrel: 0.14, barrels: 1, missiles: true };
-      case 'mirage': return { len: 1.05, wid: 0.84, hull: 12, turretLen: 0.5, turretWid: 0.46, barrel: 0.22, barrels: 1, prism: true };
-      case 'v3': return { len: 1.25, wid: 0.82, hull: 10, turretLen: 0.9, turretWid: 0.34, barrel: 0.1, barrels: 1, srocket: true };
+      // 尺寸、底盘类型、炮塔造型三者共同构成辨识度
+      case 'grizzly': return { kind: 'tracked', len: 1.12, wid: 0.92, hull: 14, turret: 'round', turretLen: 0.52, turretWid: 0.50, barrel: 0.56, barrels: 1 };
+      case 'rhino': return { kind: 'tracked', len: 1.28, wid: 1.06, hull: 18, turret: 'box', turretLen: 0.66, turretWid: 0.62, barrel: 0.64, barrels: 1 };
+      case 'apoc': return { kind: 'tracked', len: 1.52, wid: 1.18, hull: 21, turret: 'box', turretLen: 0.80, turretWid: 0.76, barrel: 0.68, barrels: 2, missiles: true };
+      case 'prismtank': return { kind: 'tracked', len: 1.14, wid: 0.90, hull: 13, turret: 'prism', turretLen: 0.50, turretWid: 0.50, barrel: 0, barrels: 0 };
+      case 'mirage': return { kind: 'tracked', len: 1.08, wid: 0.88, hull: 12, turret: 'dish', turretLen: 0.46, turretWid: 0.46, barrel: 0.30, barrels: 1 };
+      case 'ifv': return { kind: 'wheeled', len: 0.92, wid: 0.72, hull: 10, turret: 'missile', turretLen: 0.36, turretWid: 0.36, barrel: 0, barrels: 0 };
+      case 'flaktrack': return { kind: 'tracked', len: 1.00, wid: 0.78, hull: 9, turret: 'flak', turretLen: 0.4, turretWid: 0.4, barrel: 0, barrels: 4 };
+      case 'v3': return { kind: 'truck', len: 1.38, wid: 0.88, hull: 11, turret: 'rail', turretLen: 0.95, turretWid: 0.38, barrel: 0, barrels: 0 };
       default: return null;
     }
   }
 
+  /** 轮式底盘（多功能步兵车）：4 个黑色轮子，一眼区别于履带。 */
+  function drawWheels(ctx, len, wid, colors) {
+    var pts = [[-len * 0.32, -wid * 0.52], [len * 0.32, -wid * 0.52],
+      [-len * 0.32, wid * 0.52], [len * 0.32, wid * 0.52]];
+    for (var i = 0; i < pts.length; i++) {
+      var px = projX(pts[i][0], pts[i][1]);
+      var py = projY(pts[i][0], pts[i][1], 0);
+      ctx.fillStyle = '#1b1f22';
+      ctx.beginPath();
+      ctx.ellipse ? ctx.ellipse(px, py, 5, 3, 0, 0, Math.PI * 2) : ctx.arc(px, py, 4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    void colors;
+  }
+
+  /** 卡车底盘（V3）：驾驶室 + 平板货箱。 */
+  function drawTruckBody(ctx, s, colors) {
+    isoBox(ctx, len0(s), 0, 0.42, s.wid * 0.8, s.hull * 0.75, 0,
+      { base: colors.light || colors.base, dark: colors.dark }, { topBright: 1.05 });
+    isoBox(ctx, -0.15, 0, s.len * 0.62, s.wid * 0.86, s.hull * 0.55, 0, colors, { topBright: 1.02 });
+    drawTracksWheels(ctx, s, colors);
+  }
+  function len0(s) { return s.len * 0.5 - 0.18; }
+  function drawTracksWheels(ctx, s, colors) {
+    var pts = [[-s.len * 0.3, -s.wid * 0.5], [s.len * 0.1, -s.wid * 0.5],
+      [-s.len * 0.3, s.wid * 0.5], [s.len * 0.1, s.wid * 0.5]];
+    for (var i = 0; i < pts.length; i++) {
+      var px = projX(pts[i][0], pts[i][1]), py = projY(pts[i][0], pts[i][1], 0);
+      ctx.fillStyle = '#1b1f22';
+      ctx.beginPath();
+      ctx.ellipse ? ctx.ellipse(px, py, 4, 2.5, 0, 0, Math.PI * 2) : ctx.arc(px, py, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    void colors;
+  }
+
   function drawTankHull(ctx, s, colors, facing) {
-    drawTracks(ctx, s.len, s.wid, s.hull * 0.55, colors);
+    if (s.kind === 'wheeled') drawWheels(ctx, s.len, s.wid, colors);
+    else if (s.kind === 'truck') drawTruckBody(ctx, s, colors);
+    else drawTracks(ctx, s.len, s.wid, s.hull * 0.55, colors);
+    // 车体：底盘 + 上方装甲盒 + 前部斜坡，三层结构看起来更"实"
+    isoBox(ctx, 0, 0, s.len * 0.96, s.wid * 0.84, s.hull * 0.5, facing, { base: colors.dark, dark: '#20241f' }, { topBright: 1.02 });
     isoBox(ctx, 0, 0, s.len, s.wid * 0.86, s.hull, facing, colors, { topBright: 1.12 });
     isoBox(ctx, s.len * 0.42, 0, s.len * 0.16, s.wid * 0.8, s.hull * 0.75, facing,
       { base: colors.light || colors.base, dark: colors.dark }, { topBright: 0.98 });
+    // 队伍颜色：车体顶部后方的醒目标条（原版的"阵营色"）
+    topFace(ctx, -s.len * 0.3, 0, s.len * 0.26, s.wid * 0.6, s.hull + 1, facing, function (g) {
+      g.fillStyle = colors.accent;
+      g.fillRect(-s.len * 0.13, -s.wid * 0.3, s.len * 0.15, s.wid * 0.6);
+    });
   }
 
   function drawTankTurret(ctx, s, colors, angle) {
     var h = s.hull * 0.55;
+    if (s.turret === 'prism') {
+      // 光棱坦克：没有炮管，顶部是一块发光棱镜
+      isoBox(ctx, 0, 0, s.turretLen, s.turretWid, h * 0.7, angle, { base: colors.base, dark: colors.dark }, { topBright: 1.15 });
+      var px = projX(0, 0), py = projY(0, 0, h * 0.7);
+      ctx.fillStyle = 'rgba(150,225,255,0.95)';
+      ctx.beginPath();
+      ctx.moveTo(px, py - 20);
+      ctx.lineTo(px + 10, py - 6);
+      ctx.lineTo(px, py + 6);
+      ctx.lineTo(px - 10, py - 6);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      return;
+    }
+    if (s.turret === 'dish') {
+      // 幻影坦克：顶部是频谱发生器（圆盘）
+      isoBox(ctx, 0, 0, s.turretLen, s.turretWid, h * 0.6, angle, { base: colors.base, dark: colors.dark }, { topBright: 1.12 });
+      var dx = projX(0, 0), dy = projY(0, 0, h * 0.6 + 4);
+      ctx.fillStyle = '#cfd8dd';
+      ctx.beginPath();
+      ctx.ellipse ? ctx.ellipse(dx, dy, 12, 6, 0, 0, Math.PI * 2) : ctx.arc(dx, dy, 9, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#4a545a';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.fillStyle = colors.accent;
+      ctx.beginPath();
+      ctx.arc(dx, dy - 2, 2.4, 0, Math.PI * 2);
+      ctx.fill();
+      return;
+    }
+    if (s.turret === 'missile') {
+      // 多功能步兵车：小车身 + 顶部导弹箱
+      isoBox(ctx, 0, 0, s.turretLen, s.turretWid, h * 0.8, angle, { base: colors.dark, dark: '#1c1c1c' }, { topBright: 1.05 });
+      for (var mm = 0; mm < 2; mm++) {
+        isoBox(ctx, -0.05, mm ? 0.14 : -0.14, 0.36, 0.11, h * 1.1, angle,
+          { base: '#cfd8dd', dark: '#4a545a' }, { topBright: 1.15 });
+      }
+      return;
+    }
+    if (s.turret === 'flak') {
+      // 防空履带车：4 根竖直短炮管
+      isoBox(ctx, -0.05, 0, 0.34, 0.34, h * 0.6, angle, { base: colors.dark, dark: '#1b1b1b' }, { topBright: 1.05 });
+      for (var fb = 0; fb < 4; fb++) {
+        var fx = (fb % 2 ? 0.13 : -0.13), fy = (fb < 2 ? -0.13 : 0.13);
+        isoBox(ctx, fx, fy, 0.13, 0.13, h * 3.4, angle, { base: '#4a4a4a', dark: '#141414' }, { stroke: false, topBright: 1.15 });
+      }
+      // 炮盾
+      isoBox(ctx, 0.14, 0, 0.16, 0.6, h * 1.3, angle, { base: colors.light || colors.base, dark: colors.dark }, { topBright: 1.05 });
+      return;
+    }
+    if (s.turret === 'rail') {
+      // V3：斜架上的大火箭
+      isoBox(ctx, 0, 0, s.turretLen, s.turretWid, h * 0.4, angle, { base: colors.dark, dark: '#20211f' }, { topBright: 1.05 });
+      isoBox(ctx, 0.1, 0, 1.25, 0.3, h * 1.9, angle, { base: '#b8402f', dark: '#3a1410' }, { topBright: 1.1 });
+      var rx = projX(Math.cos(angle) * 0.72, Math.sin(angle) * 0.72);
+      var ry = projY(Math.cos(angle) * 0.72, Math.sin(angle) * 0.72, h * 1.9);
+      ctx.fillStyle = '#e8e0c0';
+      ctx.beginPath();
+      ctx.moveTo(rx, ry - 9);
+      ctx.lineTo(rx + 5, ry);
+      ctx.lineTo(rx - 5, ry);
+      ctx.closePath();
+      ctx.fill();
+      return;
+    }
     isoBox(ctx, 0, 0, s.turretLen, s.turretWid, h, angle, { base: colors.base, dark: colors.dark }, { topBright: 1.18 });
     for (var b = 0; b < s.barrels; b++) {
       var off = (s.barrels === 1) ? 0 : (b === 0 ? -0.09 : 0.09);
@@ -5856,67 +5986,16 @@ html, body {
       isoBox(ctx, bx, by, s.barrel, 0.11, h * 1.2, angle,
         { base: colors.dark, dark: '#20211f' }, { stroke: false, topBright: 1.1 });
     }
-    if (s.prism) {
-      var px = projX(0, 0), py = projY(0, 0, h);
-      ctx.fillStyle = 'rgba(150,220,255,0.85)';
-      ctx.beginPath();
-      ctx.moveTo(px, py - 13);
-      ctx.lineTo(px + 7, py - 5);
-      ctx.lineTo(px, py + 2);
-      ctx.lineTo(px - 7, py - 5);
-      ctx.closePath();
-      ctx.fill();
-      ctx.strokeStyle = 'rgba(230,250,255,0.9)';
-      ctx.lineWidth = 1;
-      ctx.stroke();
-    }
     if (s.missiles) {
       for (var m = 0; m < 2; m++) {
         isoBox(ctx, -s.turretLen * 0.05, m ? 0.16 : -0.16, 0.34, 0.14, h * 1.7, angle,
           { base: colors.dark, dark: '#151515' }, { topBright: 0.9 });
       }
     }
-    if (s.srocket) {
-      // V3 发射架上的大火箭（占位造型）
-      isoBox(ctx, 0.15, 0, 1.15, 0.26, h * 2.0, angle,
-        { base: '#8e2f24', dark: '#3a1410' }, { topBright: 1.05 });
-      endOfTurret(ctx, angle, s, colors, h);
-    }
     topFace(ctx, 0, 0, s.turretLen, s.turretWid, h + 1, angle, function (g) {
       g.fillStyle = colors.accent;
       g.fillRect(-0.12, -0.06, 0.24, 0.12);
     });
-  }
-
-  /** 在炮塔尖端画一个小细节（V3 的弹头）。 */
-  function endOfTurret(ctx, angle, s, colors, h) {
-    var px = Math.cos(angle) * 0.85, py = Math.sin(angle) * 0.85;
-    var gx = projX(px, py), gy = projY(px, py, h * 2.0);
-    ctx.fillStyle = '#d8d24a';
-    ctx.beginPath();
-    ctx.moveTo(gx, gy - 6);
-    ctx.lineTo(gx + 4, gy);
-    ctx.lineTo(gx - 4, gy);
-    ctx.closePath();
-    ctx.fill();
-    void colors;
-  }
-
-  /** 小型防空履带车（苏军防空履带车 / 盟军 IFV 通用造型）。 */
-  function drawTrackedCar(ctx, colors, opts) {
-    opts = opts || {};
-    var len = opts.len || 0.95, wid = opts.wid || 0.72, hull = opts.hull || 8;
-    drawTracks(ctx, len, wid, hull * 0.5, colors);
-    isoBox(ctx, 0, 0, len, wid * 0.82, hull, 0, colors, { topBright: 1.1 });
-    isoBox(ctx, -len * 0.15, 0, len * 0.42, wid * 0.62, hull * 0.7, 0,
-      { base: colors.dark, dark: '#1d1d1d' }, { topBright: 1.0 });
-    if (opts.flak) {
-      for (var i = 0; i < 4; i++) {
-        var off = (i - 1.5) * 0.11;
-        isoBox(ctx, len * 0.22, off, 0.44, 0.08, hull * 1.5, 0,
-          { base: '#3a3a3a', dark: '#141414' }, { stroke: false, topBright: 1.05 });
-      }
-    }
   }
 
   function drawHarvester(ctx, colors) {
@@ -5975,9 +6054,7 @@ html, body {
       case 'warminer':
         return function (g) { drawHarvester(g, colors); drawMinerGun(g); };
       case 'flaktrack':
-        return function (g) {
-          drawTrackedCar(g, colors, { flak: true, len: 0.95, wid: 0.74, hull: 8 });
-        };
+        return function (g) { drawTankHull(g, chassisSpec('flaktrack'), colors, angle); };
       default:
         return function (g) {
           isoBox(g, 0, 0, 0.9, 0.8, 10, angle, colors);
@@ -5986,86 +6063,154 @@ html, body {
   }
 
   function drawInfantry(g, type, colors, angle) {
-    var body = type === 'engineer' ? '#d8d2c0'
-      : (type === 'conscript' ? '#7a5a44'
-        : (type === 'guardian' ? '#5d6b5a'
-          : (type === 'tesla_trooper' ? '#6c7a86'
-            : (type === 'spy' ? '#3c4048' : '#66745f'))));
-    var helmet = type === 'conscript' ? '#5d4a3a'
-      : (type === 'tesla_trooper' ? '#9fb6c4' : (type === 'spy' ? '#2b2f36' : '#4a5a4a'));
+    // 每个兵种靠"体格 + 头盔 + 武器"三件事区分，并整体放大到能看清
+    var spec = INFANTRY_SPEC[type] || INFANTRY_SPEC.gi;
+    var body = spec.body, helmet = spec.helmet;
+    g.save();
+    g.scale(spec.scale || 1, spec.scale || 1);
     var swing = Math.sin(angle * 3) * 0.6;
     // shadow
-    g.fillStyle = 'rgba(0,0,0,0.28)';
+    g.fillStyle = 'rgba(0,0,0,0.30)';
     g.beginPath();
-    g.moveTo(-7, 2);
-    g.lineTo(3, -2);
-    g.lineTo(7, 2);
-    g.lineTo(-3, 6);
+    g.moveTo(-8, 2);
+    g.lineTo(4, -2);
+    g.lineTo(8, 2);
+    g.lineTo(-4, 6);
     g.closePath();
     g.fill();
     // legs
     g.fillStyle = shade(body, 0.72);
-    var legX = Math.cos(angle) * 2, legY = Math.sin(angle) * 1.2;
-    g.fillRect(-4 + legX, -8 + legY, 3, 9);
-    g.fillRect(1 - legX, -8 - legY, 3, 9);
-    // torso
+    var legX = Math.cos(angle) * 2.2, legY = Math.sin(angle) * 1.3;
+    g.fillRect(-5 + legX, -9 + legY, 3.6, 10);
+    g.fillRect(1 - legX, -9 - legY, 3.6, 10);
+    // torso（体格差异：间谍最瘦、磁暴/防空最壮）
     g.fillStyle = body;
-    g.fillRect(-5, -17, 9, 10);
+    g.fillRect(-spec.w, -18, spec.w * 2, 11);
     g.strokeStyle = shade(colors.dark, 0.9);
     g.lineWidth = 1;
-    g.strokeRect(-5, -17, 9, 10);
+    g.strokeRect(-spec.w, -18, spec.w * 2, 11);
+    // 队伍颜色肩章
+    g.fillStyle = colors.accent;
+    g.fillRect(-spec.w, -17, 2.4, 4.5);
+    // 队伍颜色胸前竖条（步兵体型小，这一条是最主要的敌我识别标志）
+    g.fillRect(-spec.w + 0.6, -16, 2.0, 7);
     // head + helmet
     g.fillStyle = '#d7b291';
     g.beginPath();
-    g.arc(0, -21, 4, 0, Math.PI * 2);
+    g.arc(0, -22, 4.2, 0, Math.PI * 2);
     g.fill();
     g.fillStyle = helmet;
-    g.beginPath();
-    g.arc(0, -22, 4.4, Math.PI, Math.PI * 2);
-    g.fill();
-    // weapon pointing at `angle`
-    var wx = Math.cos(angle) * 9, wy = Math.sin(angle) * 12;
-    g.strokeStyle = '#2b2b2b';
-    g.lineWidth = 2;
-    g.beginPath();
-    g.moveTo(0, -13);
-    g.lineTo(wx, -13 + wy * 0.5);
-    g.stroke();
-    if (type === 'guardian') {
-      g.strokeStyle = '#4a4a4a';
-      g.lineWidth = 4;
+    if (spec.hat === 'fedora') {
+      g.fillRect(-6, -25, 12, 2.4);
+      g.fillRect(-4, -29, 8, 4.6);
+    } else if (spec.hat === 'cap') {
       g.beginPath();
-      g.moveTo(wx * 0.7, -17 + wy * 0.4);
-      g.lineTo(wx * 1.2, -17 + wy * 0.6);
+      g.arc(0, -23, 4.7, Math.PI, Math.PI * 2);
+      g.fill();
+      g.fillRect(-4.7, -23.4, 9.4, 2.2);
+    } else {
+      g.beginPath();
+      g.arc(0, -23, 4.7, Math.PI, Math.PI * 2);
+      g.fill();
+    }
+    // 阵营色只保留"肩章 + 背后小色块"（和原版一样是小面积高对比，而不是整顶帽子）
+    g.fillStyle = colors.accent;
+    g.fillRect(spec.w - 2.4, -16.5, 2.4, 4.0);
+    if (type === 'spy') {
+      g.fillStyle = '#0d1014';
+      g.fillRect(-3.8, -22.6, 7.6, 1.8);
+    }
+    drawInfantryWeapon(g, type, angle, spec);
+    g.restore();
+    void swing;
+  }
+
+  /** 兵种武器/装备造型——辨识度主要靠这个。 */
+  function drawInfantryWeapon(g, type, angle, spec) {
+    var wx = Math.cos(angle), wy = Math.sin(angle) * 0.75;
+    if (type === 'guardian') {
+      g.strokeStyle = '#3f4a3c';
+      g.lineWidth = 5;
+      g.beginPath();
+      g.moveTo(-4, -19);
+      g.lineTo(-4 + wx * 15, -19 + wy * 11);
       g.stroke();
-    }
-    if (type === 'flak') {
-      g.fillStyle = '#3d3d3d';
-      g.fillRect(wx - 2, -16 + wy * 0.5, 5, 6);
-    }
-    if (type === 'tesla_trooper') {
-      // 背后的磁暴线圈背包
+      g.strokeStyle = '#20241f';
+      g.lineWidth = 2;
+      g.beginPath();
+      g.moveTo(-4 + wx * 15, -19 + wy * 11);
+      g.lineTo(-4 + wx * 19, -19 + wy * 14);
+      g.stroke();
+      g.fillStyle = '#4a5445';
+      g.fillRect(2, -16, 6, 6);
+    } else if (type === 'flak') {
+      g.fillStyle = '#3a3a3a';
+      g.fillRect(-5 + wx * 7, -19 + wy * 6, 11, 7);
+      for (var i = 0; i < 4; i++) {
+        g.fillStyle = '#151515';
+        g.fillRect(-4 + wx * 11, -21 + wy * 9 + i * 2.2, 7, 1.7);
+      }
+    } else if (type === 'tesla_trooper') {
       g.fillStyle = '#2f3a44';
-      g.fillRect(-9, -19, 4, 11);
-      for (var ci = 0; ci < 3; ci++) {
-        g.strokeStyle = 'rgba(150,220,255,0.9)';
-        g.lineWidth = 1;
+      g.fillRect(-11, -21, 4.4, 13);
+      for (var c = 0; c < 2; c++) {
+        for (var k = 0; k < 3; k++) {
+          g.strokeStyle = 'rgba(150,225,255,0.95)';
+          g.lineWidth = 1.2;
+          g.beginPath();
+          g.arc(-9, -19 + c * 7 + k * 2.6, 4 - k * 0.7, 0, Math.PI * 2);
+          g.stroke();
+        }
+      }
+      g.strokeStyle = '#8fd8f0';
+      g.lineWidth = 2;
+      g.beginPath();
+      g.moveTo(0, -14);
+      g.lineTo(wx * 12, -14 + wy * 8);
+      g.stroke();
+    } else if (type === 'engineer') {
+      g.fillStyle = '#e0a02a';
+      g.fillRect(2, -14, 7, 6);
+      g.fillStyle = '#8a6412';
+      g.fillRect(2, -11.4, 7, 1.4);
+      void spec;
+    } else if (type === 'spy') {
+      // 间谍：细高西装 + 明显的公文包（和动员兵拉开轮廓）
+      g.fillStyle = '#3d444e';
+      g.fillRect(3, -15, 9, 7);
+      g.fillStyle = '#0f1114';
+      g.fillRect(6, -16.6, 3, 1.8);
+    } else if (type === 'rocketeer') {
+      g.fillStyle = '#2f2f2f';
+      g.fillRect(-9, -20, 4, 12);
+    } else {
+      g.strokeStyle = '#2b2b2b';
+      g.lineWidth = 2.2;
+      g.beginPath();
+      g.moveTo(0, -14);
+      g.lineTo(wx * 13, -14 + wy * 10);
+      g.stroke();
+      if (type === 'conscript') {
+        g.strokeStyle = '#5a4a3a';
+        g.lineWidth = 1.4;
         g.beginPath();
-        g.arc(-7, -19 + ci * 3, 3.5 - ci * 0.6, 0, Math.PI * 2);
+        g.moveTo(-spec.w, -12);
+        g.lineTo(spec.w, -12);
         g.stroke();
       }
     }
-    if (type === 'spy') {
-      // 西装 + 墨镜
-      g.fillStyle = '#e8e8e8';
-      g.fillRect(-4, -14, 7, 2);
-      g.fillStyle = '#101418';
-      g.fillRect(-4, -23, 8, 2);
-    }
-    g.fillStyle = colors.accent;
-    g.fillRect(-5, -14, 2, 4);
-    void swing;
   }
+
+  var INFANTRY_SPEC = {
+    gi: { body: '#66745f', helmet: '#4a5a4a', w: 4.6, scale: 1.25 },
+    guardian: { body: '#4f5c4c', helmet: '#3d4a3c', w: 5.2, scale: 1.3 },
+    rocketeer: { body: '#7d8a94', helmet: '#5d6a74', w: 5.0, scale: 1.3 },
+    engineer: { body: '#d8d2c0', helmet: '#e8e2d0', w: 4.6, scale: 1.25 },
+    conscript: { body: '#7a5a44', helmet: '#5d4a3a', w: 4.8, hat: 'cap', scale: 1.12 },
+    flak: { body: '#6b5a46', helmet: '#57493a', w: 5.4, hat: 'cap', scale: 1.3 },
+    tesla_trooper: { body: '#6c7a86', helmet: '#9fb6c4', w: 6.0, scale: 1.4 },
+    spy: { body: '#3c4048', helmet: '#2b2f36', w: 3.4, hat: 'fedora', scale: 1.4 }
+  };
 
   /** 武装矿车顶上的机枪（占位造型）。 */
   function drawMinerGun(g) {
@@ -6415,38 +6560,121 @@ html, body {
   }
 
   // ---- 原版向新增建筑：全部为占位造型，后续可整体替换 ----
-  function drawRadar(g, colors) {
+  function drawRadar(g, colors, def, sovietAntenna) {
     isoBox(g, 0, 0, 2, 2, 12, 0, colors);
     isoBox(g, 0, 0, 1.2, 1.2, 4, 0, METAL_DARK, { topBright: 1.05 });
     var px = projX(0, 0), py = projY(0, 0, 18);
-    g.fillStyle = '#c8d2d6';
-    g.beginPath();
-    g.ellipse ? g.ellipse(px, py, 12, 6, -0.5, 0, Math.PI * 2) : g.arc(px, py, 9, 0, Math.PI * 2);
-    g.fill();
-    g.strokeStyle = '#4a545a';
-    g.lineWidth = 2;
-    g.beginPath();
-    g.moveTo(px - 10, py + 3);
-    g.lineTo(px + 10, py - 3);
-    g.stroke();
+    if (sovietAntenna) {
+      // 苏军雷达站：四根天线杆 + 中间红灯，和盟军的"大锅盖"完全不同
+      for (var i = 0; i < 4; i++) {
+        var ax = (i % 2 ? 0.45 : -0.45), ay = (i < 2 ? -0.45 : 0.45);
+        var gx = projX(ax, ay), gy = projY(ax, ay, 14);
+        g.strokeStyle = '#8f989c';
+        g.lineWidth = 3;
+        g.beginPath();
+        g.moveTo(gx, gy);
+        g.lineTo(gx, gy - 22 - (i % 2) * 6);
+        g.stroke();
+        g.fillStyle = '#c8342a';
+        g.beginPath();
+        g.arc(gx, gy - 23 - (i % 2) * 6, 2.4, 0, Math.PI * 2);
+        g.fill();
+      }
+      g.strokeStyle = 'rgba(200,220,230,0.6)';
+      g.lineWidth = 1;
+      g.beginPath();
+      g.moveTo(px - 12, py - 8);
+      g.lineTo(px + 12, py - 16);
+      g.stroke();
+    } else {
+      // 盟军空军指挥部：地面大雷达盘 + 天线
+      g.fillStyle = '#c8d2d6';
+      g.beginPath();
+      g.ellipse ? g.ellipse(px, py, 22, 10.5, -0.42, 0, Math.PI * 2) : g.arc(px, py, 16, 0, Math.PI * 2);
+      g.fill();
+      g.fillStyle = 'rgba(255,255,255,0.5)';
+      g.beginPath();
+      g.ellipse ? g.ellipse(px - 4, py - 3, 12, 5.4, -0.42, 0, Math.PI * 2) : g.arc(px, py, 8, 0, Math.PI * 2);
+      g.fill();
+      g.strokeStyle = '#4a545a';
+      g.lineWidth = 2;
+      g.beginPath();
+      g.moveTo(px - 18, py + 6);
+      g.lineTo(px + 18, py - 8);
+      g.stroke();
+    }
     topFace(g, 0, 0, 2, 2, 12, 0, function (gg) {
       gg.fillStyle = 'rgba(40,46,52,0.9)';
       gg.fillRect(-0.85, -0.85, 1.7, 1.7);
       gg.fillStyle = colors.accent;
       gg.fillRect(-0.85, -0.85, 0.3, 1.7);
-      gg.fillStyle = 'rgba(140,220,255,0.7)';
-      gg.fillRect(0.2, -0.6, 0.5, 1.2);
+      gg.fillStyle = 'rgba(160,190,210,0.5)';
+      gg.fillRect(0.2, -0.6, 0.45, 1.2);
+    });
+    void def;
+  }
+
+  /** 间谍卫星：细长桅杆 + 顶部卫星盘 + 两侧太阳能板（和雷达站明显不同）。 */
+  function drawSatellite(g, colors) {
+    isoBox(g, 0, 0, 2, 2, 9, 0, METAL_DARK);
+    isoFrustum(g, 0, 0, 0.7, 0.7, 0.42, 0.42, 34, 0, METAL);
+    var px = projX(0, 0), py = projY(0, 0, 52);
+    g.fillStyle = '#dfe8ee';
+    g.beginPath();
+    g.ellipse ? g.ellipse(px, py, 11, 5.5, 0.35, 0, Math.PI * 2) : g.arc(px, py, 9, 0, Math.PI * 2);
+    g.fill();
+    g.strokeStyle = '#5a646a';
+    g.lineWidth = 1.5;
+    g.stroke();
+    // 太阳能板
+    g.fillStyle = 'rgba(90,150,220,0.95)';
+    g.fillRect(px - 26, py + 4, 18, 9);
+    g.fillRect(px + 8, py + 4, 18, 9);
+    g.strokeStyle = '#2b3a4c';
+    g.lineWidth = 1;
+    g.strokeRect(px - 26.5, py + 3.5, 18, 9);
+    g.strokeRect(px + 7.5, py + 3.5, 18, 9);
+    g.fillStyle = colors.accent;
+    g.fillRect(px - 3, py + 14, 6, 4);
+    topFace(g, 0, 0, 2, 2, 9, 0, function (gg) {
+      gg.fillStyle = 'rgba(34,40,48,0.9)';
+      gg.fillRect(-0.85, -0.85, 1.7, 1.7);
+      gg.fillStyle = colors.accent;
+      gg.fillRect(-0.85, 0.45, 1.7, 0.3);
+    });
+  }
+
+  /** 高级电厂：三座冷却塔 + 蓝色变电区，一眼区别于普通电厂。 */
+  function drawAdvPower(g, colors) {
+    isoBox(g, 0, 0, 2, 2, 16, 0, { base: '#8fa0a6', dark: '#2f383c' });
+    isoFrustum(g, -0.55, -0.4, 0.66, 0.66, 0.5, 0.5, 40, 0, METAL);
+    isoFrustum(g, 0.4, -0.55, 0.66, 0.66, 0.5, 0.5, 40, 0, METAL);
+    isoFrustum(g, -0.15, 0.5, 0.66, 0.66, 0.5, 0.5, 36, 0, METAL);
+    // 金色高压变电区（和普通电厂彻底分开）
+    isoBox(g, 0.45, 0.45, 0.8, 0.8, 12, 0, { base: '#c8b24a', dark: '#4a3a10' }, { topBright: 1.1 });
+    topFace(g, 0, 0, 2, 2, 16, 0, function (gg) {
+      gg.fillStyle = 'rgba(34,40,44,0.92)';
+      gg.fillRect(-0.9, -0.9, 1.8, 1.8);
+      gg.fillStyle = '#d8c05a';
+      gg.fillRect(-0.6, 0.3, 1.2, 0.4);
+      gg.fillStyle = colors.accent;
+      gg.fillRect(-0.9, -0.9, 0.34, 1.8);
     });
   }
 
   function drawGap(g, colors) {
     isoBox(g, 0, 0, 2, 2, 12, 0, colors);
-    isoFrustum(g, 0, 0, 1.4, 1.4, 0.6, 0.6, 12, 0, { base: '#8fa6b4', dark: '#33414a' });
+    isoFrustum(g, 0, 0, 1.6, 1.6, 0.5, 0.5, 18, 0, { base: '#9a8fc0', dark: '#3a3550' });
     var px = projX(0, 0), py = projY(0, 0, 26);
-    g.fillStyle = 'rgba(150,220,255,0.25)';
-    g.beginPath();
-    g.ellipse ? g.ellipse(px, py, 16, 8, 0, 0, Math.PI * 2) : g.arc(px, py, 12, 0, Math.PI * 2);
-    g.fill();
+    // 视觉干扰波纹：裂缝产生器的标志
+    for (var ri = 0; ri < 3; ri++) {
+      g.strokeStyle = 'rgba(185,150,255,' + (0.5 - ri * 0.13).toFixed(2) + ')';
+      g.lineWidth = 2;
+      g.beginPath();
+      g.ellipse ? g.ellipse(px, py - ri * 5, 21 - ri * 4, 10 - ri * 2, 0, 0, Math.PI * 2)
+        : g.arc(px, py, 14 - ri * 3, 0, Math.PI * 2);
+      g.stroke();
+    }
     topFace(g, 0, 0, 2, 2, 12, 0, function (gg) {
       gg.fillStyle = 'rgba(38,48,56,0.9)';
       gg.fillRect(-0.85, -0.85, 1.7, 1.7);
@@ -6457,20 +6685,21 @@ html, body {
 
   function drawChronosphere(g, colors) {
     isoBox(g, 0, 0, 2, 2, 10, 0, colors);
-    var px = projX(0, 0), py = projY(0, 0, 16);
-    g.strokeStyle = 'rgba(150,230,255,0.95)';
-    g.lineWidth = 4;
+    var px = projX(0, 0), py = projY(0, 0, 22);
+    // 巨大的时空环 + 中心球体，标志性极强
+    g.strokeStyle = 'rgba(120,210,255,0.95)';
+    g.lineWidth = 6;
     g.beginPath();
-    g.ellipse ? g.ellipse(px, py, 20, 10, 0, 0, Math.PI * 2) : g.arc(px, py, 14, 0, Math.PI * 2);
+    g.ellipse ? g.ellipse(px, py, 30, 15, 0, 0, Math.PI * 2) : g.arc(px, py, 21, 0, Math.PI * 2);
     g.stroke();
     g.strokeStyle = 'rgba(255,255,255,0.8)';
     g.lineWidth = 2;
     g.beginPath();
-    g.ellipse ? g.ellipse(px, py, 12, 6, 0, 0, Math.PI * 2) : g.arc(px, py, 8, 0, Math.PI * 2);
+    g.ellipse ? g.ellipse(px, py, 21, 10.5, 0, 0, Math.PI * 2) : g.arc(px, py, 14, 0, Math.PI * 2);
     g.stroke();
-    g.fillStyle = 'rgba(190,240,255,0.7)';
+    g.fillStyle = 'rgba(205,245,255,0.85)';
     g.beginPath();
-    g.arc(px, py, 5, 0, Math.PI * 2);
+    g.arc(px, py, 7, 0, Math.PI * 2);
     g.fill();
     topFace(g, 0, 0, 2, 2, 10, 0, function (gg) {
       gg.fillStyle = 'rgba(34,42,52,0.9)';
@@ -6482,15 +6711,20 @@ html, body {
 
   function drawWeather(g, colors) {
     isoBox(g, 0, 0, 2, 2, 12, 0, colors);
-    isoFrustum(g, 0, 0, 0.6, 0.6, 0.4, 0.4, 30, 0, METAL);
+    isoFrustum(g, 0, 0, 1.1, 1.1, 0.4, 0.4, 30, 0, METAL);
     var px = projX(0, 0), py = projY(0, 0, 44);
-    g.strokeStyle = 'rgba(200,240,255,0.9)';
-    g.lineWidth = 2;
+    // 顶部乌云盘
+    g.fillStyle = 'rgba(70,86,104,0.92)';
     g.beginPath();
-    g.moveTo(px, py - 10);
-    g.lineTo(px - 3, py + 2);
-    g.lineTo(px + 2, py - 2);
-    g.lineTo(px - 1, py + 10);
+    g.ellipse ? g.ellipse(px, py + 6, 24, 9, 0, 0, Math.PI * 2) : g.arc(px, py + 6, 16, 0, Math.PI * 2);
+    g.fill();
+    g.strokeStyle = 'rgba(200,240,255,0.9)';
+    g.lineWidth = 3;
+    g.beginPath();
+    g.moveTo(px, py - 12);
+    g.lineTo(px - 6, py + 4);
+    g.lineTo(px + 4, py - 2);
+    g.lineTo(px - 2, py + 14);
     g.stroke();
     topFace(g, 0, 0, 2, 2, 12, 0, function (gg) {
       gg.fillStyle = 'rgba(36,44,54,0.9)';
@@ -6624,10 +6858,10 @@ html, body {
     soviet_flak: drawFlakCannon,
     soviet_tesla: drawTeslaCoil,
     // 原版向新增建筑（占位造型）
-    allied_adv_power: function (g, c) { drawPowerPlant(g, c, false); },
-    allied_radar: drawRadar,
-    soviet_radar: drawRadar,
-    allied_satellite: drawRadar,
+    allied_adv_power: drawAdvPower,
+    allied_radar: function (g, c) { drawRadar(g, c, null, false); },
+    soviet_radar: function (g, c) { drawRadar(g, c, null, true); },
+    allied_satellite: drawSatellite,
     allied_gap: drawGap,
     allied_chronosphere: drawChronosphere,
     allied_weather: drawWeather,
@@ -7501,6 +7735,15 @@ html, body {
       if (!p || !p.placing || !view.hoverTile) return;
       var def = Rules.get(p.placing.typeId);
       if (!def) return;
+      // 先画出"可以建造的范围"（原版没有，但玩家很需要这个提示）
+      var R = Rules.BUILD_RADIUS;
+      ctx.save();
+      for (var bi = 0; bi < state.buildings.length; bi++) {
+        var b = state.buildings[bi];
+        if (b.dead || b.owner !== view.playerIdx) continue;
+        Art.groundQuad(ctx, b.cx, b.cy, b.w + R * 2, b.h + R * 2, 0, 'rgba(90,200,255,0.06)');
+      }
+      ctx.restore();
       var t = view.hoverTile;
       var check = Sim.canPlace(state, view.playerIdx, def.id, t.x, t.y);
       Art.groundQuad(ctx, t.x + def.w / 2, t.y + def.h / 2, def.w, def.h, 0,
@@ -8541,7 +8784,7 @@ html, body {
         ['矿车', '自动前往矿区装满矿石，再回精炼厂卸货换钱。'],
         ['矿石精炼厂', '第一座精炼厂会附赠一辆矿车；靠近新矿脉再造一座能显著提高收入。'],
         ['电力', '用电超过发电时，防御建筑停机、建造速度减半。'],
-        ['建造厂', '负责建造建筑，放置时必须紧贴已有建筑。'],
+        ['建造厂', '负责建造建筑；放置时只要在基地 5 格范围内即可，不必紧贴。'],
         ['工程师', '走进敌方建筑即可占领（保留 50% 生命值）。'],
         ['经验晋升', '击杀敌人可让单位晋升为老兵 / 精英，火力更强并会自我修复。']
       ],
@@ -8642,6 +8885,7 @@ html, body {
       'reason.trees': '需要先清理树木',
       'reason.ore': '不能建造在矿脉上',
       'reason.notAdjacent': '必须紧贴自己的基地建造',
+      'reason.tooFar': '超出基地范围（只能建在离基地 {n} 格以内）',
       'reason.unitsInWay': '有单位挡住了位置',
       'reason.invalid': '无效的位置'
     },
@@ -8727,7 +8971,7 @@ html, body {
         ['Ore Miner', 'Fills up at an ore field and unloads at a refinery for credits.'],
         ['Ore Refinery', 'Your first refinery comes with a free miner. Build more near fresh ore.'],
         ['Power', 'Consuming more than you produce shuts defences down and halves build speed.'],
-        ['Construction Yard', 'Builds structures; they must be placed next to your existing base.'],
+        ['Construction Yard', 'Builds structures; place them anywhere within 5 tiles of your base.'],
         ['Engineer', 'Walk him into an enemy structure to capture it (keeps 50% HP).'],
         ['Veterancy', 'Kills promote units to veteran and elite, with better guns and self-repair.']
       ],
@@ -8829,6 +9073,7 @@ html, body {
       'reason.trees': 'Clear the trees first',
       'reason.ore': 'Cannot build on ore',
       'reason.notAdjacent': 'Must be built next to your base',
+      'reason.tooFar': 'Outside your base area (place it within {n} tiles of your base)',
       'reason.unitsInWay': 'Something is in the way',
       'reason.invalid': 'Invalid location'
     }
@@ -9007,6 +9252,7 @@ html, body {
     if (result.reasonKey) {
       var params = {};
       if (result.needTag) params.name = I18n.prereqName(result.needTag);
+      if (result.reasonKey === 'tooFar') params.n = RA.Rules.BUILD_RADIUS;
       return I18n.t('reason.' + result.reasonKey, params);
     }
     return result.reason || '';

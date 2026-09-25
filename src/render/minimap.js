@@ -91,8 +91,26 @@
       ctx.clearRect(0, 0, W, H);
       ctx.fillStyle = '#0a0f16';
       ctx.fillRect(0, 0, W, H);
-      ctx.drawImage(base, 0, 0);
+      // 没有雷达站 / 空军指挥部 : 小地图不可用（与原版一致）
       var player = state.players[playerIdx];
+      if (!player.hasRadar) {
+        ctx.fillStyle = '#070c12';
+        ctx.fillRect(0, 0, W, H);
+        ctx.strokeStyle = 'rgba(120,150,180,0.25)';
+        ctx.lineWidth = 1;
+        for (var gy = 6; gy < H; gy += 7) {
+          ctx.beginPath();
+          ctx.moveTo(4, gy);
+          ctx.lineTo(W - 4, gy);
+          ctx.stroke();
+        }
+        ctx.fillStyle = 'rgba(200,225,245,0.75)';
+        ctx.font = '12px Consolas, monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(RA.I18n.t('hud.radarOffline'), W / 2, H / 2);
+        return;
+      }
+      ctx.drawImage(base, 0, 0);
       var i, e, p;
       // structures
       for (i = 0; i < state.buildings.length; i++) {

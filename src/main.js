@@ -440,6 +440,56 @@
         case 'suddenDeath':
           announce('suddenDeath', 'warn');
           break;
+        case 'radarOnline':
+          if (e.player === 0) { RA.Sfx.play('buildingComplete'); hud.alert(RA.I18n.t('alert.radarOnline'), 'good'); }
+          break;
+        case 'radarOffline':
+          if (e.player === 0) { RA.Sfx.play('lowPower'); hud.alert(RA.I18n.t('alert.radarOffline'), 'warn'); }
+          break;
+        case 'superReady':
+          if (e.player === 0) {
+            RA.Sfx.play('buildingComplete');
+            hud.alert(RA.I18n.t('alert.superReady', { name: RA.I18n.t('sw.' + e.key) }), 'good');
+          }
+          break;
+        case 'nuke':
+          RA.Sfx.play('bigExplosion');
+          settings.shake !== false && (shake.t = 0.6, shake.mag = 14);
+          if (e.player === 0) hud.alert(RA.I18n.t('alert.superFired', { name: RA.I18n.t('sw.nuke') }), 'good');
+          else hud.alert(RA.I18n.t('alert.superFired', { name: RA.I18n.t('sw.nuke') }), 'bad');
+          break;
+        case 'storm':
+          RA.Sfx.play('thunder');
+          hud.alert(RA.I18n.t('alert.superFired', { name: RA.I18n.t('sw.weather') }), e.player === 0 ? 'good' : 'bad');
+          break;
+        case 'thunder':
+          RA.Sfx.play('thunder');
+          break;
+        case 'ironCurtain':
+          RA.Sfx.play('iron');
+          hud.alert(RA.I18n.t('alert.superFired', { name: RA.I18n.t('sw.ironcurtain') }), e.player === 0 ? 'good' : 'bad');
+          break;
+        case 'chrono':
+          RA.Sfx.play('chrono');
+          hud.alert(RA.I18n.t('alert.superFired', { name: RA.I18n.t('sw.chronosphere') }), e.player === 0 ? 'good' : 'bad');
+          break;
+        case 'chronoJump':
+          if (e.player === 0) { RA.Sfx.play('chrono'); hud.alert(RA.I18n.t('alert.chronoJump'), ''); }
+          break;
+        case 'coilCharged':
+          if (e.player === 0) {
+            RA.Sfx.play('iron');
+            hud.alert(RA.I18n.t(e.on ? 'alert.coilCharged' : 'alert.coilUncharged'), e.on ? 'good' : '');
+          }
+          break;
+        case 'infiltrate':
+          RA.Sfx.play('capture');
+          if (e.player === 0) hud.alert(RA.I18n.t('alert.infiltrate'), 'good');
+          else if (e.from === 0) {
+            RA.Sfx.play('underAttack');
+            hud.alert(RA.I18n.t('alert.infiltrated', { name: RA.I18n.nameOf(e.typeId) }), 'bad');
+          }
+          break;
         case 'defeated':
           if (e.player === 0) announce('allStructuresLost', 'bad');
           break;
@@ -563,6 +613,26 @@
 
     hud = RA.Hud.create(root, {
       getState: function () { return state; },
+      onSuperClick: function (key) {
+        if (!state) return;
+        var chk = Sim.canFireSuper(state, 0, key);
+        if (!chk.ok) {
+          var list = Sim.superList(state, 0);
+          var nm = key;
+          for (var i = 0; i < list.length; i++) if (list[i].key === key) nm = RA.I18n.t('sw.' + key);
+          hud.alert(RA.I18n.t('alert.superCharging', { name: nm }), 'warn');
+          RA.Sfx.play('deny');
+          return;
+        }
+        if (view.armingSuper && view.armingSuper.key === key) {
+          view.armingSuper = null;
+          RA.Sfx.play('cancel');
+          return;
+        }
+        view.armingSuper = { key: key, phase: 0 };
+        hud.alert(RA.I18n.t(key === 'chronosphere' ? 'alert.aimSource' : 'alert.superAim'), 'warn');
+        RA.Sfx.play('click');
+      },
       onSound: function (name, arg) { RA.Sfx.play(name, arg); },
       onRepair: repairSelected,
       onSell: sellSelected,

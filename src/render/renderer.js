@@ -263,6 +263,16 @@
       var sx = Iso.sx(e.x, e.y);
       var sy = Iso.sy(e.x, e.y) - (e.def.flying ? (e.def.altitude || 1.6) * Art.TILE_H * 0.55 : 0);
       var rad = (e.def.radius || 0.3) * 3.6;
+      // 幻影坦克伪装：画成一棵树（原版机制）
+      if (e.disguised) {
+        var tree = Art.objectSprite('tree', (e.id % 3));
+        if (view && view.playerIdx === e.owner && view.selected && view.selected.has(e.id)) {
+          Art.groundQuad(ctx, e.x, e.y, rad, rad, 0, 'rgba(70,235,110,0.45)');
+        }
+        ctx.drawImage(tree, Math.round(sx - tree.width / 2),
+          Math.round(sy + Art.TILE_H / 2 - tree.height + 4));
+        return;
+      }
       if (view && view.selected && view.selected.has(e.id)) {
         ctx.save();
         Art.groundQuad(ctx, e.x, e.y, rad, rad, 0, 'rgba(70,235,110,0.45)');
@@ -289,6 +299,17 @@
         ctx.restore();
       }
       Art.drawUnit(ctx, e.type, player.colorId, sx, sy, e.facing, e.turret);
+      // 铁幕护罩
+      if (e.invulnUntil && state.tick < e.invulnUntil) {
+        ctx.save();
+        ctx.globalAlpha = 0.55 + 0.25 * Math.sin(state.tick * 0.4 + e.id);
+        ctx.strokeStyle = 'rgba(150,255,240,0.95)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.ellipse ? ctx.ellipse(sx, sy - 6, 14, 9, 0, 0, Math.PI * 2) : ctx.arc(sx, sy - 6, 11, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
       if (e.rank > 0) {
         ctx.save();
         ctx.fillStyle = e.rank === 2 ? '#ffd85e' : '#d0e4ff';
@@ -509,7 +530,115 @@
             ctx.fillRect(sx + Math.cos(ha) * 9, sy - 6 - p * 14 + Math.sin(ha) * 4, 3, 3);
           }
           ctx.restore();
+        } else if (e.type === 'lightning') {
+          ctx.save();
+          ctx.globalCompositeOperation = 'lighter';
+          ctx.globalAlpha = 1 - p;
+          ctx.strokeStyle = 'rgba(210,240,255,0.95)';
+          ctx.lineWidth = 3;
+          ctx.beginPath();
+          var lx = sx, ly = sy, tx = sx, ty = sy - 80;
+          ctx.moveTo(tx, ty);
+          for (var ls = 1; ls <= 6; ls++) {
+            var lt = ls / 6;
+            var jit = (ls === 6) ? 0 : (((ls * 53 + e.x * 7) % 13) - 6) * 2.4;
+            ctx.lineTo(U.lerp(tx, lx, lt) + jit, U.lerp(ty, ly, lt));
+          }
+          ctx.stroke();
+          ctx.globalAlpha = (1 - p) * 0.5;
+          ctx.fillStyle = '#ffffff';
+          ctx.beginPath();
+          ctx.arc(sx, sy - 4, 8 * (1 - p), 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        } else if (e.type === 'nukeFlash') {
+          ctx.save();
+          ctx.globalCompositeOperation = 'lighter';
+          ctx.globalAlpha = Math.max(0, 1 - p * 1.4);
+          ctx.fillStyle = '#fff6c8';
+          ctx.beginPath();
+          ctx.arc(sx, sy - 8, 40 + p * 260, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.globalAlpha = Math.max(0, 0.8 - p);
+          ctx.strokeStyle = '#ffd070';
+          ctx.lineWidth = 6 * (1 - p);
+          ctx.beginPath();
+          ctx.arc(sx, sy - 8, 30 + p * 300, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.restore();
+        } else if (e.type === 'chrono') {
+          ctx.save();
+          ctx.globalCompositeOperation = 'lighter';
+          ctx.globalAlpha = (1 - p) * 0.9;
+          ctx.strokeStyle = 'rgba(150,230,255,0.95)';
+          ctx.lineWidth = 2;
+          for (var ci = 0; ci < 3; ci++) {
+            ctx.beginPath();
+            ctx.arc(sx, sy - e.t * 4, 6 + ci * 6 + p * 10, 0, Math.PI * 2);
+            ctx.stroke();
+          }
+          ctx.restore();
+        } else if (e.type === 'iron') {
+          ctx.save();
+          ctx.globalCompositeOperation = 'lighter';
+          ctx.globalAlpha = (1 - p) * 0.8;
+          ctx.strokeStyle = 'rgba(160,255,240,0.95)';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(sx, sy - 6, 10 + p * 16, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.restore();
+        } else if (e.type === 'ironField') {
+          ctx.save();
+          ctx.globalAlpha = (1 - p) * 0.5;
+          ctx.strokeStyle = 'rgba(150,255,240,0.8)';
+          ctx.lineWidth = 2;
+          var rr = (e.data && e.data.r) || 3.2;
+          Art.groundQuad(ctx, e.x, e.y, rr * 2, rr * 2, 0, 'rgba(90,255,235,0.10)');
+          ctx.strokeStyle = 'rgba(150,255,240,0.7)';
+          ctx.beginPath();
+          ctx.moveTo(Iso.sx(e.x - rr, e.y), Iso.sy(e.x - rr, e.y));
+          ctx.lineTo(Iso.sx(e.x, e.y + rr), Iso.sy(e.x, e.y + rr));
+          ctx.lineTo(Iso.sx(e.x + rr, e.y), Iso.sy(e.x + rr, e.y));
+          ctx.lineTo(Iso.sx(e.x, e.y - rr), Iso.sy(e.x, e.y - rr));
+          ctx.closePath();
+          ctx.stroke();
+          ctx.restore();
+        } else if (e.type === 'ironHit') {
+          ctx.save();
+          ctx.globalCompositeOperation = 'lighter';
+          ctx.globalAlpha = 1 - p;
+          ctx.fillStyle = '#a8fff0';
+          ctx.beginPath();
+          ctx.arc(sx, sy - 6, 4 + p * 6, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
         }
+      }
+    }
+
+    /** 天气控制器的雷暴云 + 微闪。 */
+    function drawStorms(state) {
+      if (!state.storms || !state.storms.length) return;
+      for (var i = 0; i < state.storms.length; i++) {
+        var s = state.storms[i];
+        var sx = Iso.sx(s.x, s.y), sy = Iso.sy(s.x, s.y);
+        var flash = 0.10 + 0.06 * Math.sin(state.tick * 0.5 + i) +
+          (state.tick % 7 === 0 ? 0.12 : 0);
+        ctx.save();
+        ctx.globalAlpha = U.clamp(flash, 0, 0.35);
+        ctx.fillStyle = '#1b2430';
+        ctx.beginPath();
+        ctx.ellipse ? ctx.ellipse(sx, sy - 30, s.r * Art.TILE_W * 0.5, s.r * Art.TILE_H * 0.6, 0, 0, Math.PI * 2)
+          : ctx.arc(sx, sy - 30, s.r * 20, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+        ctx.save();
+        ctx.globalAlpha = 0.5;
+        ctx.strokeStyle = 'rgba(120,160,200,0.5)';
+        ctx.lineWidth = 1;
+        Art.groundQuad(ctx, s.x, s.y, s.r * 2, s.r * 2, 0, 'rgba(90,140,190,0.10)');
+        ctx.restore();
       }
     }
 
@@ -569,6 +698,15 @@
       if (!p || !p.placing || !view.hoverTile) return;
       var def = Rules.get(p.placing.typeId);
       if (!def) return;
+      // 先画出"可以建造的范围"（原版没有，但玩家很需要这个提示）
+      var R = Rules.BUILD_RADIUS;
+      ctx.save();
+      for (var bi = 0; bi < state.buildings.length; bi++) {
+        var b = state.buildings[bi];
+        if (b.dead || b.owner !== view.playerIdx) continue;
+        Art.groundQuad(ctx, b.cx, b.cy, b.w + R * 2, b.h + R * 2, 0, 'rgba(90,200,255,0.06)');
+      }
+      ctx.restore();
       var t = view.hoverTile;
       var check = Sim.canPlace(state, view.playerIdx, def.id, t.x, t.y);
       Art.groundQuad(ctx, t.x + def.w / 2, t.y + def.h / 2, def.w, def.h, 0,
@@ -732,6 +870,7 @@
       }
       drawProjectiles(state);
       drawEffects(state);
+      drawStorms(state);
       drawWaypointLines(state, view);
       drawCommandFeedback(view);
       drawFog(state, playerIdx);

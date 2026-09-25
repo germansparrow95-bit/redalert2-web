@@ -28,8 +28,9 @@
       repair: root.querySelector('#btnRepair'),
       sell: root.querySelector('#btnSell'),
       timer: root.querySelector('#gameTimer'),
-        faction: root.querySelector('#factionLabel')
-      };
+      faction: root.querySelector('#factionLabel'),
+      superPanel: root.querySelector('#superPanel')
+    };
     el.hint = root.querySelector('#hintBar');
     el.btnMenu = root.querySelector('#btnMenu');
 
@@ -40,6 +41,7 @@
     var displayCredits = 0;
     var alerts = [];
     var minimap = null;
+    var swButtons = {};
 
     /** Always work with the current game state (it changes between matches). */
     function sync() {
@@ -255,6 +257,7 @@
       if (el.timer) {
         el.timer.textContent = U.formatTime(state.tick, Rules.TICKS_PER_SEC);
       }
+      updateSuperPanel(state, view);
       if (el.faction) {
         el.faction.textContent = RA.I18n.factionName(p.faction);
       }
@@ -269,6 +272,49 @@
       if (minimap) minimap.draw(state, { renderer: opts.getRenderer ? opts.getRenderer() : null });
       if (el.repair) el.repair.disabled = !hasSelectedBuilding(state, view);
       if (el.sell) el.sell.disabled = !hasSelectedBuilding(state, view);
+    }
+
+    /** 超级武器按钮：显示充能进度，充能完毕可以点击瞄准。 */
+    function updateSuperPanel(state, view) {
+      if (!el.superPanel) return;
+      var list = Sim.superList(state, playerIdx);
+      el.superPanel.innerHTML = '';
+      swButtons = {};
+      for (var i = 0; i < list.length; i++) {
+        var s = list[i];
+        var b = document.createElement('button');
+        b.className = 'swBtn' + (s.ready ? ' ready' : '') +
+          (view && view.armingSuper && view.armingSuper.key === s.key ? ' aiming' : '');
+        b.dataset.swKey = s.key;
+        b.title = T('sw.' + s.key) + ' - ' + s.desc;
+        var icon = document.createElement('canvas');
+        icon.width = 40; icon.height = 30;
+        icon.className = 'swIcon';
+        var src = RA.Art.iconSprite(s.buildingType, state.players[playerIdx].colorId, 40, 30);
+        icon.getContext('2d').drawImage(src, 0, 0);
+        b.appendChild(icon);
+        var text = document.createElement('span');
+        text.className = 'swText';
+        var nm = document.createElement('span');
+        nm.className = 'swName';
+        nm.textContent = T('sw.' + s.key);
+        var pct = document.createElement('span');
+        pct.className = 'swPct';
+        pct.textContent = s.ready ? T('sw.ready') : Math.floor(s.charge / s.max * 100) + '%';
+        text.appendChild(nm);
+        text.appendChild(pct);
+        b.appendChild(text);
+        var bar = document.createElement('div');
+        bar.className = 'swBar';
+        var fill = document.createElement('i');
+        fill.style.width = U.clamp(s.charge / s.max, 0, 1) * 100 + '%';
+        bar.appendChild(fill);
+        b.appendChild(bar);
+        b.addEventListener('click', (function (key) {
+          return function () { if (opts.onSuperClick) opts.onSuperClick(key); };
+        })(s.key));
+        el.superPanel.appendChild(b);
+      }
     }
 
     function hasSelectedBuilding(state, view) {

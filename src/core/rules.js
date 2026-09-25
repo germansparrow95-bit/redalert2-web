@@ -178,6 +178,87 @@
         speed: 0, projectile: 'tesla', targets: 'ground'
       },
       desc: 'Lightning arc. Devastating, and it needs a lot of power.'
+    },
+    // ---- 原版向：电厂升级 / 雷达 / 卫星 / 辅助建筑 ----
+    {
+      id: 'allied_adv_power', name: 'Advanced Power Plant', faction: 'allied', tab: 'structures',
+      cost: 500, buildTime: sec(16), power: 200, hp: 900, armor: 'concrete', sight: 6,
+      w: 2, h: 2, prereq: ['power'], tags: ['power', 'structure'], art: 'power',
+      desc: 'Twice the output of a Power Plant and tougher to crack.'
+    },
+    {
+      id: 'allied_radar', name: 'Airforce Command HQ', faction: 'allied', tab: 'structures',
+      cost: 1000, buildTime: sec(18), power: -50, hp: 1000, armor: 'concrete', sight: 8,
+      w: 2, h: 2, prereq: ['refinery'], tags: ['radar', 'structure'], art: 'radar',
+      desc: 'Radar uplink: without it the minimap stays dark, just like the original.'
+    },
+    {
+      id: 'allied_satellite', name: 'Spy Satellite Uplink', faction: 'allied', tab: 'structures',
+      cost: 1500, buildTime: sec(24), power: -100, hp: 1000, armor: 'concrete', sight: 6,
+      w: 2, h: 2, prereq: ['radar', 'lab'], tags: ['radar', 'satellite', 'structure'], art: 'radar',
+      desc: 'Reveals the whole battlefield for as long as it stands.'
+    },
+    {
+      id: 'allied_gap', name: 'Gap Generator', faction: 'allied', tab: 'structures',
+      cost: 1000, buildTime: sec(18), power: -100, hp: 800, armor: 'concrete', sight: 6,
+      w: 2, h: 2, prereq: ['lab'], tags: ['gap', 'structure'], art: 'gap',
+      desc: 'Hides everything inside its field from radar.'
+    },
+    {
+      id: 'allied_chronosphere', name: 'Chronosphere', faction: 'allied', tab: 'structures',
+      cost: 2500, buildTime: sec(40), power: -200, hp: 1000, armor: 'concrete', sight: 6,
+      w: 2, h: 2, prereq: ['lab', 'satellite'], tags: ['super', 'structure'], art: 'chronosphere',
+      superweapon: { key: 'chronosphere', charge: sec(240),
+        desc: '点击两次：先选我方部队所在位置，再选传送目的地。' },
+      desc: 'Teleports everything in a small area across the map.'
+    },
+    {
+      id: 'allied_weather', name: 'Weather Control Device', faction: 'allied', tab: 'structures',
+      cost: 2500, buildTime: sec(40), power: -200, hp: 1000, armor: 'concrete', sight: 6,
+      w: 2, h: 2, prereq: ['lab', 'satellite'], tags: ['super', 'structure'], art: 'weather',
+      superweapon: { key: 'weather', charge: sec(300),
+        desc: '在一片区域召唤持续 20 秒的闪电风暴。' },
+      desc: 'Summons a lightning storm over an area.'
+    },
+    {
+      id: 'soviet_radar', name: 'Radar Tower', faction: 'soviet', tab: 'structures',
+      cost: 1000, buildTime: sec(18), power: -50, hp: 1000, armor: 'concrete', sight: 8,
+      w: 2, h: 2, prereq: ['refinery'], tags: ['radar', 'structure'], art: 'radar',
+      desc: 'Radar uplink: without it the minimap stays dark.'
+    },
+    {
+      id: 'soviet_nuclear', name: 'Nuclear Reactor', faction: 'soviet', tab: 'structures',
+      cost: 1000, buildTime: sec(24), power: 2000, hp: 900, armor: 'concrete', sight: 6,
+      w: 2, h: 2, prereq: ['lab'], tags: ['power', 'structure'], art: 'nuclear',
+      desc: 'Enormous power output - and a nuclear bang when it dies.'
+    },
+    {
+      id: 'soviet_ironcurtain', name: 'Iron Curtain', faction: 'soviet', tab: 'structures',
+      cost: 2500, buildTime: sec(40), power: -200, hp: 1000, armor: 'concrete', sight: 6,
+      w: 2, h: 2, prereq: ['lab'], tags: ['super', 'structure'], art: 'ironcurtain',
+      superweapon: { key: 'ironcurtain', charge: sec(240),
+        desc: '让一片区域内的我方单位 20 秒内免疫全部伤害。' },
+      desc: 'Makes everything in an area invulnerable for a while.'
+    },
+    {
+      id: 'soviet_nuke', name: 'Nuclear Missile Silo', faction: 'soviet', tab: 'structures',
+      cost: 2500, buildTime: sec(40), power: -200, hp: 1000, armor: 'concrete', sight: 6,
+      w: 2, h: 2, prereq: ['lab'], tags: ['super', 'structure'], art: 'nuke',
+      superweapon: { key: 'nuke', charge: sec(300),
+        desc: '向目标区域发射核弹，造成毁灭性伤害。' },
+      desc: 'Launches a nuclear missile at any point on the map.'
+    },
+    {
+      id: 'ore_purifier', name: 'Ore Purifier', faction: 'any', tab: 'structures',
+      cost: 2000, buildTime: sec(24), power: -50, hp: 1000, armor: 'concrete', sight: 6,
+      w: 2, h: 2, prereq: ['refinery'], tags: ['refinery', 'purifier', 'structure'], art: 'purifier',
+      desc: 'Every ore load delivered is worth 25% more.'
+    },
+    {
+      id: 'service_depot', name: 'Service Depot', faction: 'any', tab: 'structures',
+      cost: 800, buildTime: sec(16), power: -50, hp: 1100, armor: 'concrete', sight: 6,
+      w: 3, h: 2, prereq: ['factory'], tags: ['service', 'structure'], art: 'depot',
+      desc: 'Park damaged vehicles on the pad: they are repaired for a small fee.'
     }
   ];
 
@@ -186,11 +267,12 @@
   // ---------------------------------------------------------------------
   var UNITS = [
     {
-      id: 'harvester', name: 'Ore Miner', faction: 'any', tab: 'vehicles',
+      id: 'harvester', name: 'Chrono Miner', faction: 'allied', tab: 'vehicles',
       cost: 1400, buildTime: sec(18), hp: 600, armor: 'light', sight: 7,
       speed: 1.7, radius: 0.34, turnRate: 3.4, weapons: null, turret: false,
       capacity: 500, harvestInterval: sec(0.4), art: 'harvester',
-      desc: 'Mines ore and returns it to a refinery. The backbone of your economy.'
+      abilities: ['chrono'],
+      desc: 'Mines ore, then teleports the full load straight back to the refinery.'
     },
     {
       id: 'gi', name: 'G.I.', faction: 'allied', tab: 'infantry',
@@ -292,6 +374,78 @@
       }],
       prereqExtra: ['lab'],
       desc: 'Mobile fortress. Slow, expensive, and terrifying.'
+    },
+    // ---- 原版向：新增兵种（美术为占位图形）----
+    {
+      id: 'ifv', name: 'I.F.V.', faction: 'allied', tab: 'vehicles',
+      cost: 600, buildTime: sec(9), hp: 200, armor: 'light', sight: 9,
+      speed: 2.8, radius: 0.28, turnRate: 3.2, turret: true, turretRate: 3.0, art: 'ifv',
+      weapons: [{
+        name: 'Missile Launcher', damage: 25, warhead: 'rocket', rof: sec(1.6), range: 5.2,
+        speed: 9, projectile: 'rocket', targets: 'both'
+      }],
+      desc: 'Fast multi-role scout. Fastest thing on the battlefield, hits air and ground.'
+    },
+    {
+      id: 'mirage', name: 'Mirage Tank', faction: 'allied', tab: 'vehicles',
+      cost: 1000, buildTime: sec(14), hp: 200, armor: 'light', sight: 8,
+      speed: 2.0, radius: 0.32, turnRate: 2.4, turret: true, turretRate: 2.0, art: 'mirage',
+      weapons: [{
+        name: 'Spectrum Cannon', damage: 100, warhead: 'prism', rof: sec(2.4), range: 5.2,
+        speed: 0, projectile: 'beam', targets: 'ground'
+      }],
+      abilities: ['disguise'], prereqExtra: ['lab'],
+      desc: 'Stands still and looks like a tree; only spotted at point-blank range.'
+    },
+    {
+      id: 'warminer', name: 'War Miner', faction: 'soviet', tab: 'vehicles',
+      cost: 1400, buildTime: sec(18), hp: 650, armor: 'light', sight: 7,
+      speed: 1.7, radius: 0.34, turnRate: 3.4, turret: false, art: 'warminer',
+      capacity: 500, harvestInterval: sec(0.4),
+      weapons: [{
+        name: 'Mounted MG', damage: 14, warhead: 'smallArms', rof: sec(0.7), range: 3.6,
+        speed: 0, projectile: 'tracer', targets: 'both'
+      }],
+      desc: 'Ore miner that shoots back while it works.'
+    },
+    {
+      id: 'flaktrack', name: 'Flak Track', faction: 'soviet', tab: 'vehicles',
+      cost: 500, buildTime: sec(8), hp: 200, armor: 'light', sight: 9,
+      speed: 2.6, radius: 0.28, turnRate: 3.2, turret: false, art: 'flaktrack',
+      weapons: [{
+        name: 'Quad Flak', damage: 22, warhead: 'flak', rof: sec(1.1), range: 4.4,
+        speed: 0, projectile: 'flak', targets: 'both'
+      }],
+      desc: 'Cheap fast anti-air track, also shreds infantry.'
+    },
+    {
+      id: 'v3', name: 'V3 Rocket Launcher', faction: 'soviet', tab: 'vehicles',
+      cost: 800, buildTime: sec(13), hp: 150, armor: 'light', sight: 8,
+      speed: 1.5, radius: 0.32, turnRate: 2.0, turret: true, turretRate: 1.4, art: 'v3',
+      weapons: [{
+        name: 'V3 Rocket', damage: 160, warhead: 'he', rof: sec(4.5), range: 8.5,
+        speed: 5, projectile: 'rocket', targets: 'ground', splash: 1.4
+      }],
+      prereqExtra: ['lab'],
+      desc: 'Long-range siege rocket. Slow, fragile, devastating against buildings.'
+    },
+    {
+      id: 'tesla_trooper', name: 'Tesla Trooper', faction: 'soviet', tab: 'infantry',
+      cost: 500, buildTime: sec(9), hp: 120, armor: 'infantry', sight: 7,
+      speed: 1.0, radius: 0.16, turnRate: 6, turret: false, art: 'tesla_trooper',
+      weapons: [{
+        name: 'Tesla Suit', damage: 40, warhead: 'tesla', rof: sec(1.8), range: 3.6,
+        speed: 0, projectile: 'tesla', targets: 'ground'
+      }],
+      abilities: ['charge'], prereqExtra: ['barracks'],
+      desc: 'Walking tesla coil: fries infantry, and can super-charge your Tesla Coils.'
+    },
+    {
+      id: 'spy', name: 'Spy', faction: 'allied', tab: 'infantry',
+      cost: 1000, buildTime: sec(12), hp: 60, armor: 'infantry', sight: 7,
+      speed: 1.4, radius: 0.15, turnRate: 8, turret: false, art: 'spy',
+      weapons: null, abilities: ['infiltrate'], prereqExtra: ['lab'],
+      desc: 'Walks into an enemy structure: refineries pay out, power plants black out the base.'
     }
   ];
 
@@ -377,6 +531,8 @@
   Rules.GEM_MULTIPLIER = 2;       // gems are worth double
   Rules.ORE_REGROW_TICKS = 26;    // ticks per +1 credit of regrowth
   Rules.SELL_REFUND = 0.5;
+  /** 建筑必须建在自己基地多少格范围内（0 = 必须紧贴，默认 5 格比较宽松）。 */
+  Rules.BUILD_RADIUS = 5;
   Rules.REPAIR_RATE = 0.6;        // hp per tick
   Rules.REPAIR_COST_PER_HP = 0.25;
   Rules.CAPTURE_HP_FRACTION = 0.5;

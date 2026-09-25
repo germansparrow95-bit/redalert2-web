@@ -120,6 +120,32 @@
       if (opts.onSound) opts.onSound(command === 'attack' ? 'ackAttack' : 'ack');
     }
 
+    /** 超级武器瞄准：点第一下（传送仪选起点），点第二下（选终点）。 */
+    function fireArmedSuper(tile) {
+      var st = state();
+      var arm = view.armingSuper;
+      if (!arm) return;
+      if (arm.key === 'chronosphere' && arm.phase === 0) {
+        arm.source = { x: tile.fx, y: tile.fy };
+        arm.phase = 1;
+        if (opts.onAlert) opts.onAlert(RA.I18n.t('alert.aimTarget'));
+        addFeedback('deploy', tile.fx, tile.fy, '#8fe0ff');
+        return;
+      }
+      var res = Sim.fireSuper(st, 0, arm.key,
+        arm.source ? arm.source.x : tile.fx,
+        arm.source ? arm.source.y : tile.fy,
+        tile.fx, tile.fy);
+      if (res.ok) {
+        addFeedback('deploy', tile.fx, tile.fy, '#ffb84a');
+        if (opts.onSound) opts.onSound('ackAttack');
+      } else {
+        if (opts.onSound) opts.onSound('deny');
+        if (opts.onAlert) opts.onAlert(res.reason || RA.I18n.t('reason.unavailable'));
+      }
+      view.armingSuper = null;
+    }
+
     function addFeedback(type, x, y, color) {
       view.feedback.push({ type: type, x: x, y: y, t: 0, life: 0.7, color: color });
       if (view.feedback.length > 12) view.feedback.shift();
@@ -153,6 +179,11 @@
       mouse.x = p.x; mouse.y = p.y;
       var st = state();
       if (ev.button === 0) {
+        // 超级武器瞄准中：左键确定目标点
+        if (view.armingSuper) {
+          fireArmedSuper(renderer().tileAtScreen(p.x, p.y));
+          return;
+        }
         if (st.players[0].placing) {
           var t = renderer().tileAtScreen(p.x, p.y);
           tryPlace(t);
@@ -198,7 +229,10 @@
       // cursor mode
       var mode = 'move';
       var color = '#dff4ff';
-      if (st.players[0].placing) {
+      if (view.armingSuper) {
+        mode = 'deploy';
+        color = '#ffb84a';
+      } else if (st.players[0].placing) {
         var chk = Sim.canPlace(st, 0, st.players[0].placing.typeId, t.x, t.y);
         mode = chk.ok ? 'place' : 'no';
         color = chk.ok ? '#9dffb0' : '#ff7a6a';
@@ -309,7 +343,8 @@
       var handled = true;
 
       if (ev.key === 'Escape') {
-        if (st.players[0].placing) Sim.cancelPlacement(st, 0);
+        if (view.armingSuper) view.armingSuper = null;
+        else if (st.players[0].placing) Sim.cancelPlacement(st, 0);
         else if (attackMoveArmed) attackMoveArmed = false;
         else opts.onPause && opts.onPause();
       } else if (k >= '1' && k <= '9') {

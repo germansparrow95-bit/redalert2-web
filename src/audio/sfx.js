@@ -89,6 +89,21 @@
   }
 
   var BANK = {
+    thunder: function () {
+      noise(0.5, 900, 60, 0.4, 0, 'lowpass');
+      tone(60, 0.45, 'sine', 0.2, 0, 30);
+      noise(0.25, 3000, 400, 0.18, 0.05, 'bandpass');
+    },
+    iron: function () {
+      tone(180, 0.6, 'sawtooth', 0.14, 0, 1100);
+      tone(240, 0.5, 'square', 0.08, 0.08, 1400);
+      noise(0.5, 400, 3000, 0.08, 0.05, 'highpass');
+    },
+    chrono: function () {
+      tone(300, 0.45, 'sine', 0.14, 0, 1800);
+      tone(450, 0.4, 'triangle', 0.1, 0.06, 2400);
+      noise(0.3, 1200, 5000, 0.07, 0, 'highpass');
+    },
     radio: function () {
       // short radio blip used when no Chinese voice is available
       noise(0.05, 2600, 900, 0.05, 0, 'bandpass');

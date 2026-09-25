@@ -304,6 +304,14 @@
   }
 
   function powerPlantType(p) { return p.faction === 'soviet' ? 'soviet_power' : 'allied_power'; }
+  function radarType(p) { return p.faction === 'soviet' ? 'soviet_radar' : 'allied_radar'; }
+  function aatype(p) { return p.faction === 'soviet' ? 'soviet_flak' : 'allied_patriot'; }
+  function minerType(p) { return p.faction === 'soviet' ? 'warminer' : 'harvester'; }
+  function superTypes(p) {
+    return p.faction === 'soviet'
+      ? ['soviet_ironcurtain', 'soviet_nuke']
+      : ['allied_chronosphere', 'allied_weather'];
+  }
 
   function powerPressure(state, p, buildings) {
     var produced = p.power.produced, consumed = p.power.consumed;
@@ -330,17 +338,57 @@
     if (factories < 1 && queue(state, p, 'warfactory')) return;
 
     var wantMiners = (p.difficulty === 'easy' ? 2 : (p.difficulty === 'hard' ? 5 : 3)) + Math.max(0, refineries - 1);
-    if (miners < wantMiners && factories > 0 && queue(state, p, 'harvester')) return;
+    if (miners < wantMiners && factories > 0 && queue(state, p, minerType(p))) return;
+
+    // 科技优先于"锦上添花"的建筑：有钱先上作战实验室和超级武器，
+    // 否则钱会被防御/精炼器花掉，永远攒不出实验室（曾经导致 AI 不再出兵）
+    if (labs < 1 && p.credits > 3400 && queue(state, p, 'lab')) return;
+    if (labs > 0 && p.credits > 3200) {
+      var sw = superTypes(p);
+      for (var si = 0; si < sw.length; si++) {
+        if (queue(state, p, sw[si])) return;
+      }
+    }
+
+    // 雷达站：原版里没雷达就没有小地图，AI 也会尽早补上
+    if (buildingCount(state, p, radarType(p)) === 0 && p.credits > 1500 && miners >= 2 &&
+      queue(state, p, radarType(p))) return;
 
     if (diff.waveMul >= 1 && defenses < 2 && queue(state, p, defenseType(p, false))) return;
 
     if (refineries < 2 && p.credits > 3200 && queue(state, p, 'refinery')) return;
     if (factories < 2 && p.credits > 4000 && queue(state, p, 'warfactory')) return;
-    if (labs < 1 && p.credits > 3000 && queue(state, p, 'lab')) return;
+    // 矿石精炼器（+25% 收益）与维修厂
+    if (buildingCount(state, p, 'ore_purifier') === 0 && p.credits > 3200 &&
+      queue(state, p, 'ore_purifier')) return;
+    if (buildingCount(state, p, 'service_depot') === 0 && factories > 0 &&
+      p.credits > 2000 && queue(state, p, 'service_depot')) return;
+
+    // 防空：发现敌方空军就补防空
+    if (enemyAirCount(state, p) > 0 && !hasReadyOrQueued(state, p, aatype(p)) &&
+      p.credits > 1200 && queue(state, p, aatype(p))) return;
+
     if (defenses < 4 && p.credits > 2200 && queue(state, p, defenseType(p, labs > 0))) return;
     if (refineries < 3 && p.credits > 6000 && queue(state, p, 'refinery')) return;
     if (barracks < 2 && p.credits > 2500 && queue(state, p, 'barracks')) return;
-    if (p.power.consumed + 60 > p.power.produced && queue(state, p, ptype)) return;
+
+    // 电力吃紧：优先上高级电厂 / 核反应堆（但别把造矿车的钱花光）
+    if (p.power.low || (p.power.consumed + 60 > p.power.produced && p.credits > 2600)) {
+      if (p.faction === 'soviet' && labs > 0 && queue(state, p, 'soviet_nuclear')) return;
+      if (p.faction === 'allied' && queue(state, p, 'allied_adv_power')) return;
+      if (queue(state, p, ptype)) return;
+    }
+  }
+
+  /** 看得见的敌方飞行单位数量。 */
+  function enemyAirCount(state, p) {
+    var n = 0;
+    for (var i = 0; i < state.units.length; i++) {
+      var u = state.units[i];
+      if (u.dead || u.owner === p.index || !u.def.flying) continue;
+      if (Sim.isEntityVisible(state, p.index, u)) n++;
+    }
+    return n;
   }
 
   function defenseType(p, advanced) {
@@ -351,11 +399,43 @@
   function decideProduction(state, p, buildings, units, base) {
     var lab = buildingCount(state, p, 'lab') > 0;
     var army = 0, miners = 0;
+    var spies = 0;
     for (var i = 0; i < units.length; i++) {
       var u = units[i];
       if (u.def.capacity) { miners++; continue; }
+      if (u.type === 'spy') spies++;
       if (Sim.primaryWeapon(u)) army++;
     }
+
+    // 经济优先：缺矿车而且一时买不起时，先攒钱，不要把余钱全砸进部队
+    var refineries = buildingCount(state, p, 'refinery');
+    var wantMiners = (p.difficulty === 'easy' ? 2 : (p.difficulty === 'hard' ? 5 : 3)) +
+      Math.max(0, refineries - 1);
+    var minerId = minerType(p);
+    if (miners < wantMiners && !hasReadyOrQueued(state, p, minerId) &&
+      p.credits < Rules.get(minerId).cost + 300) {
+      return;
+    }
+
+    // 科技优先：钱不够时先攒着上作战实验室 / 超级武器，别把钱全变成兵
+    var labCount = buildingCount(state, p, 'lab');
+    var swCount = 0;
+    var swTypes = superTypes(p);
+    for (var swi = 0; swi < swTypes.length; swi++) swCount += buildingCount(state, p, swTypes[swi]);
+    var hasProducer = producerCount(state, p, 'vehicle') > 0;
+    if (hasProducer) {
+      var hold = false;
+      if (labCount === 0 && !hasReadyOrQueued(state, p, 'lab') && army >= 6 && p.credits < 3600) hold = true;
+      if (labCount > 0 && swCount === 0 && army >= 8 && p.credits < 3400) hold = true;
+      // 保险：最多攒 60 秒，超时就照常出兵，避免把自己憋死
+      if (hold) {
+        if (!p.ai.holdSince) p.ai.holdSince = state.tick;
+        if (state.tick - p.ai.holdSince < 60 * HZ2()) return;
+      } else {
+        p.ai.holdSince = 0;
+      }
+    }
+
     var diff = Rules.DIFFICULTIES[p.difficulty];
     var target = Math.round((6 + state.tick / (HZ2() * 45)) * diff.waveMul);
     target = U.clamp(target, 4, p.difficulty === 'hard' ? 40 : (p.difficulty === 'easy' ? 16 : 30));
@@ -369,6 +449,10 @@
       var vehType = pickVehicle(state, p, lab, army);
       if (queue(state, p, vehType)) return;
     }
+    // 盟军偶尔派间谍去偷钱 / 断电（一次性单位，保持 1 个以内）
+    if (p.faction === 'allied' && lab && spies === 0 && p.credits > 3000 && state.rng() < 0.3) {
+      if (queue(state, p, 'spy')) return;
+    }
   }
 
   function HZ2() { return Rules.TICKS_PER_SEC; }
@@ -376,7 +460,8 @@
   function pickInfantry(p, lab, state) {
     var r = state.rng();
     if (p.faction === 'soviet') {
-      if (r < 0.35) return 'conscript';
+      if (r < 0.3) return 'conscript';
+      if (r < 0.42) return 'tesla_trooper';
       return 'flak';
     }
     if (lab && r < 0.3) return 'guardian';
@@ -387,10 +472,14 @@
   function pickVehicle(state, p, lab, army) {
     var r = state.rng();
     if (p.faction === 'soviet') {
-      if (lab && r < 0.28) return 'apoc';
+      if (lab && r < 0.2) return 'apoc';
+      if (lab && r < 0.32) return 'v3';
+      if (r < 0.48) return 'flaktrack';
       return 'rhino';
     }
-    if (lab && r < 0.3) return 'prismtank';
+    if (lab && r < 0.2) return 'mirage';
+    if (lab && r < 0.32) return 'prismtank';
+    if (r < 0.48) return 'ifv';
     return 'grizzly';
   }
 
@@ -408,6 +497,17 @@
     for (i = 0; i < units.length; i++) {
       var u = units[i];
       if (u.def.capacity) {
+        // 矿车被打就跑回基地（原版矿车不会傻站着挨打）
+        if (u.hp < u.maxHp * 0.65) {
+          var flee = threatsNear(state, p, u.x, u.y, 6);
+          if (flee.length) {
+            var refuge = nearestOwnBuilding(state, p, u.x, u.y);
+            if (refuge) {
+              Sim.issueOrder(state, p.index, [u.id], { type: 'move', x: refuge.cx, y: refuge.cy });
+              continue;
+            }
+          }
+        }
         if (!u.dead && (!u.order || (u.order.type !== 'harvest' && u.order.type !== 'dock' && u.order.type !== 'move')) &&
           u.state !== 'harvesting' && u.state !== 'return' && u.state !== 'docking') {
           Sim.issueOrder(state, p.index, [u.id], { type: 'harvest' });
@@ -616,6 +716,18 @@
 
   function idOf(u) { return u.id; }
 
+  /** 离某点最近的自有建筑（矿车避难用）。 */
+  function nearestOwnBuilding(state, p, x, y) {
+    var best = null, bestD = 1e9;
+    for (var i = 0; i < state.buildings.length; i++) {
+      var b = state.buildings[i];
+      if (b.dead || b.owner !== p.index) continue;
+      var d = U.dist2(x, y, b.cx, b.cy);
+      if (d < bestD) { bestD = d; best = b; }
+    }
+    return best;
+  }
+
   /**
    * Who marches out in this wave?  The bulk of the army, leaving a small
    * garrison behind - and the members are frozen so reinforcements pile up at
@@ -673,6 +785,100 @@
   }
 
   // ---------------------------------------------------------------------
+  // 超级武器：和玩家一样需要手动瞄准，但由 AI 自己选目标
+  // ---------------------------------------------------------------------
+  function useSuperweapons(state, p, base) {
+    var list = Sim.superList(state, p.index);
+    var ready = null;
+    for (var i = 0; i < list.length; i++) if (list[i].ready) { ready = list[i]; break; }
+    if (!ready) return;
+
+    if (ready.key === 'nuke' || ready.key === 'weather') {
+      var target = pickSuperTarget(state, p, base);
+      if (target) Sim.fireSuper(state, p.index, ready.key, target.cx, target.cy);
+      return;
+    }
+    if (ready.key === 'ironcurtain') {
+      var cluster = biggestOwnCluster(state, p, 3.0, null);
+      if (cluster && cluster.count >= 4) Sim.fireSuper(state, p.index, ready.key, cluster.x, cluster.y);
+      return;
+    }
+    if (ready.key === 'chronosphere') {
+      var army = biggestOwnCluster(state, p, 3.0, function (u) {
+        return !!Sim.primaryWeapon(u) && !u.def.flying;
+      });
+      if (!army || army.count < 4) return;
+      var dst = pickSuperTarget(state, p, base);
+      if (dst) Sim.fireSuper(state, p.index, ready.key, army.x, army.y, dst.cx, dst.cy);
+    }
+  }
+
+  /** 选一个建筑最密集 / 最值钱的目标（核弹、天气、超时空偷袭用）。 */
+  function pickSuperTarget(state, p, base) {
+    var best = null, bestScore = -1e9;
+    for (var i = 0; i < state.buildings.length; i++) {
+      var b = state.buildings[i];
+      if (b.dead || b.owner === p.index) continue;
+      if (!Sim.isEntityKnown(state, p.index, b)) continue;
+      var cluster = 0;
+      for (var k = 0; k < state.buildings.length; k++) {
+        var o = state.buildings[k];
+        if (o.dead || o.owner !== b.owner) continue;
+        if (U.dist(o.cx, o.cy, b.cx, b.cy) < 3.2) cluster++;
+      }
+      var score = cluster * 7 - U.dist(b.cx, b.cy, base.x, base.y) * 0.08;
+      if (b.type === 'conyard') score += 10;
+      if (b.type === 'refinery') score += 6;
+      if (b.type === 'warfactory') score += 4;
+      if (score > bestScore) { bestScore = score; best = b; }
+    }
+    return best;
+  }
+
+  /** 我方最密集的一堆单位（铁幕、超时空起跳点用）。 */
+  function biggestOwnCluster(state, p, radius, filter) {
+    var own = [];
+    for (var i = 0; i < state.units.length; i++) {
+      var u = state.units[i];
+      if (u.dead || u.owner !== p.index) continue;
+      if (filter && !filter(u)) continue;
+      own.push(u);
+    }
+    var best = null, bestCount = 0;
+    for (i = 0; i < own.length; i++) {
+      var count = 1;
+      for (var k = 0; k < own.length; k++) {
+        if (k === i) continue;
+        if (U.dist(own[i].x, own[i].y, own[k].x, own[k].y) <= radius) count++;
+      }
+      if (count > bestCount) { bestCount = count; best = { x: own[i].x, y: own[i].y, count: count }; }
+    }
+    return best;
+  }
+
+  /** 间谍：自己找敌方精炼厂 / 电厂下手。 */
+  function useSpies(state, p, units) {
+    for (var i = 0; i < units.length; i++) {
+      var sp = units[i];
+      if (sp.type !== 'spy') continue;
+      if (sp.order && (sp.order.type === 'infiltrate' ||
+        (sp.order.type === 'attack' && sp.order.targetId))) continue;
+      var best = null, bestScore = -1e9;
+      for (var k = 0; k < state.buildings.length; k++) {
+        var b = state.buildings[k];
+        if (b.dead || b.owner === p.index) continue;
+        if (!Sim.isEntityKnown(state, p.index, b)) continue;
+        var tags = b.def.tags || [];
+        var score = 40 - U.dist(b.cx, b.cy, sp.x, sp.y) * 0.2;
+        if (tags.indexOf('refinery') >= 0) score += 20;
+        if (tags.indexOf('power') >= 0) score += 14;
+        if (score > bestScore) { bestScore = score; best = b; }
+      }
+      if (best) Sim.issueOrder(state, p.index, [sp.id], { type: 'attack', targetId: best.id });
+    }
+  }
+
+  // ---------------------------------------------------------------------
   function think(state, p) {
     var units = ownUnits(state, p.index);
     var buildings = [];
@@ -687,6 +893,8 @@
     decideConstruction(state, p, buildings, units, base);
     decideProduction(state, p, buildings, units, base);
     decideMilitary(state, p, units, base);
+    useSpies(state, p, units);
+    useSuperweapons(state, p, base);
 
     // Expansion: if the local ore is gone, open a second mining operation.
     if (state.tick - p.ai.lastExpandTick > 30 * Rules.TICKS_PER_SEC) {

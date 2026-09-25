@@ -34,6 +34,12 @@
       credits: 0,
       defeated: false,
       power: { produced: 0, consumed: 0, low: false },
+      hasRadar: false,
+      hasSatellite: false,
+      oreBonus: 1,
+      sw: {},          // 超级武器充能进度（tick）
+      swMax: {},       // 需要的充能时间
+      powerSabotageUntil: 0,
       queues: { structures: [], defenses: [], infantry: [], vehicles: [] },
       placing: null,
       visibility: { visible: new Uint8Array(1), explored: new Uint8Array(1) },
@@ -135,7 +141,7 @@
       var refSpot = findBuildSpot(state.map, 'refinery', yard.x + 3, yard.y + 1, 10, { state: state, owner: player.index });
       if (refSpot) {
         var ref = spawnBuilding(state, player.index, 'refinery', refSpot.x, refSpot.y, { complete: true, instant: true });
-        spawnUnit(state, player.index, 'harvester', ref.dockX, ref.dockY + 0.9);
+        spawnUnit(state, player.index, minerFor(state, player.index), ref.dockX, ref.dockY + 0.9);
       }
     }
   }
@@ -147,6 +153,9 @@
   function findBuildSpot(map, typeId, tx, ty, radius, opts) {
     var def = Rules.get(typeId);
     if (!def) return null;
+    // 容错：调用方可能传小数坐标（例如单位中心点），统一取整
+    tx = Math.floor(tx);
+    ty = Math.floor(ty);
     radius = radius || 6;
     var requireAdjacent = !!(opts && opts.state && opts.owner !== undefined &&
       Sim.buildingCount(opts.state, opts.owner, null, false) > 0);
@@ -365,6 +374,13 @@
   Sim.spawnBuilding = spawnBuilding;
   Sim.findBuildSpot = findBuildSpot;
   Sim.footprintFree = footprintFree;
+
+  /** 阵营对应的矿车型号（盟军=超时空矿车，苏军=战争矿车）。 */
+  function minerFor(state, owner) {
+    var p = state.players[owner];
+    return (p && p.faction === 'soviet') ? 'warminer' : 'harvester';
+  }
+  Sim.minerFor = minerFor;
 
   // =====================================================================
   // Events / effects / decals
@@ -592,6 +608,8 @@
         if (pw >= 0) produced += pw; else consumed += -pw;
       }
       var wasLow = p.power.low;
+      // 间谍破坏电力：电厂被渗透后 30 秒内完全失去供电
+      if (p.powerSabotageUntil && state.tick < p.powerSabotageUntil) produced = 0;
       p.power.produced = produced;
       p.power.consumed = consumed;
       p.power.low = consumed > produced;
@@ -612,6 +630,184 @@
     p.credits += amount;
     p.stats.creditsEarned += amount;
   };
+
+  // =====================================================================
+  // Support structures: radar, satellite, ore purifier, superweapons
+  // =====================================================================
+  function updateSupport(state) {
+    for (var pi = 0; pi < state.players.length; pi++) {
+      var p = state.players[pi];
+      var radar = false, sat = false, purifier = false;
+      var charging = {};
+      for (var i = 0; i < state.buildings.length; i++) {
+        var b = state.buildings[i];
+        if (b.dead || b.owner !== pi || !b.complete) continue;
+        var tags = b.def.tags || [];
+        if (tags.indexOf('radar') >= 0) radar = true;
+        if (tags.indexOf('satellite') >= 0) sat = true;
+        if (tags.indexOf('purifier') >= 0) purifier = true;
+        if (b.def.superweapon) charging[b.def.superweapon.key] = b.def.superweapon.charge;
+      }
+      if (p.hasRadar !== radar) addEvent(state, { type: radar ? 'radarOnline' : 'radarOffline', player: pi });
+      p.hasRadar = radar;
+      p.hasSatellite = sat;
+      p.oreBonus = purifier ? 1.25 : 1;
+      // 超级武器：建筑在就充能，建筑没了就归零（与原版一致）
+      for (var key in charging) {
+        if (p.sw[key] === undefined) p.sw[key] = 0;
+        p.swMax[key] = charging[key];
+        if (p.sw[key] < charging[key]) p.sw[key] += 1;
+        if (p.sw[key] === charging[key] && !p.swAnnounced) p.swAnnounced = {};
+        if (p.sw[key] === charging[key] && !p.swAnnounced[key]) {
+          p.swAnnounced[key] = true;
+          addEvent(state, { type: 'superReady', player: pi, key: key });
+        }
+      }
+      for (key in p.sw) {
+        if (charging[key] === undefined) {
+          p.sw[key] = 0;
+          if (p.swAnnounced) p.swAnnounced[key] = false;
+        }
+      }
+      // 卫星上线后永久点亮全图
+      if (sat) {
+        var vis = p.visibility;
+        for (i = 0; i < vis.explored.length; i++) vis.explored[i] = 1;
+      }
+    }
+  }
+
+  /** 玩家的超级武器列表（给侧边栏用）。 */
+  Sim.superList = function (state, playerIdx) {
+    var p = state.players[playerIdx];
+    var out = [];
+    for (var i = 0; i < state.buildings.length; i++) {
+      var b = state.buildings[i];
+      if (b.dead || b.owner !== playerIdx || !b.complete || !b.def.superweapon) continue;
+      var sw = b.def.superweapon;
+      var have = p.sw[sw.key] || 0;
+      var found = false;
+      for (var k = 0; k < out.length; k++) if (out[k].key === sw.key) found = true;
+      if (found) continue;
+      out.push({
+        key: sw.key,
+        buildingType: b.type,
+        name: b.def.name,
+        desc: sw.desc,
+        charge: have,
+        max: sw.charge,
+        ready: have >= sw.charge
+      });
+    }
+    return out;
+  };
+
+  Sim.canFireSuper = function (state, playerIdx, key) {
+    var list = Sim.superList(state, playerIdx);
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].key === key) {
+        return list[i].ready ? { ok: true } : { ok: false, reason: '充能中' };
+      }
+    }
+    return { ok: false, reason: '未建造' };
+  };
+
+  /**
+   * 发射超级武器。chronosphere 需要 (x,y)=起点、(tx,ty)=终点；
+   * 其余三个只需要 (x,y)=目标点。
+   */
+  Sim.fireSuper = function (state, playerIdx, key, x, y, tx, ty) {
+    var chk = Sim.canFireSuper(state, playerIdx, key);
+    if (!chk.ok) return chk;
+    var p = state.players[playerIdx];
+    var i, u, e;
+
+    if (key === 'nuke') {
+      spawnExplosion(state, x, y, 30, playerIdx, true);
+      addEffect(state, 'nukeFlash', x, y, 40, { owner: playerIdx });
+      addDecal(state, x, y, 'scorch', 1, 1, 0);
+      splashDamage(state, x, y, 3.2, 700, 'he', playerIdx, 0, true);
+      addEvent(state, { type: 'nuke', player: playerIdx, x: x, y: y });
+    } else if (key === 'weather') {
+      state.storms = state.storms || [];
+      state.storms.push({
+        x: x, y: y, r: 4.2, owner: playerIdx,
+        until: state.tick + 20 * HZ, next: state.tick + 6
+      });
+      addEvent(state, { type: 'storm', player: playerIdx, x: x, y: y });
+    } else if (key === 'ironcurtain') {
+      for (i = 0; i < state.units.length; i++) {
+        u = state.units[i];
+        if (u.dead || u.owner !== playerIdx) continue;
+        if (U.dist(u.x, u.y, x, y) > 3.2) continue;
+        u.invulnUntil = state.tick + 20 * HZ;
+        addEffect(state, 'iron', u.x, u.y, 24, { owner: playerIdx });
+      }
+      addEffect(state, 'ironField', x, y, 30, { owner: playerIdx, r: 3.2 });
+      addEvent(state, { type: 'ironCurtain', player: playerIdx, x: x, y: y });
+    } else if (key === 'chronosphere') {
+      var moved = 0;
+      var gather = [];
+      for (i = 0; i < state.units.length; i++) {
+        u = state.units[i];
+        if (u.dead || u.owner !== playerIdx) continue;
+        if (U.dist(u.x, u.y, x, y) > 3.0) continue;
+        gather.push(u);
+      }
+      for (i = 0; i < gather.length; i++) {
+        u = gather[i];
+        var off = RA.Pathfind.formationOffsets(gather.length, 0.85)[i] || { x: 0, y: 0 };
+        addEffect(state, 'chrono', u.x, u.y, 18, { owner: playerIdx });
+        var dest = RA.Pathfind.nearestFreeTile(state.map,
+          Math.floor(tx + off.x), Math.floor(ty + off.y), 4);
+        u.x = dest ? dest.x + 0.5 : tx + off.x;
+        u.y = dest ? dest.y + 0.5 : ty + off.y;
+        u.path = null;
+        addEffect(state, 'chrono', u.x, u.y, 18, { owner: playerIdx });
+        moved++;
+      }
+      addEvent(state, { type: 'chrono', player: playerIdx, count: moved, x: tx, y: ty });
+      if (!moved) return { ok: false, reason: '起点附近没有我方单位' };
+    }
+    p.sw[key] = 0;
+    return { ok: true };
+  };
+
+  function updateStorms(state) {
+    if (!state.storms || !state.storms.length) return;
+    for (var i = state.storms.length - 1; i >= 0; i--) {
+      var s = state.storms[i];
+      if (state.tick > s.until) { state.storms.splice(i, 1); continue; }
+      if (state.tick < s.next) continue;
+      s.next = state.tick + Math.round(HZ * (0.35 + state.rng() * 0.35));
+      var a = state.rng() * U.TAU;
+      var rr = Math.sqrt(state.rng()) * s.r;
+      var sx = s.x + Math.cos(a) * rr, sy = s.y + Math.sin(a) * rr;
+      splashDamage(state, sx, sy, 1.3, 95, 'tesla', s.owner);
+      addEffect(state, 'lightning', sx, sy, 12, { owner: s.owner });
+      addEvent(state, { type: 'thunder', x: sx, y: sy });
+    }
+  }
+
+  /** 维修厂：停在旁边的我方载具持续回血，按血量扣钱。 */
+  function updateDepots(state) {
+    if (state.tick % 3 !== 0) return;
+    for (var i = 0; i < state.buildings.length; i++) {
+      var b = state.buildings[i];
+      if (b.dead || !b.complete) continue;
+      if ((b.def.tags || []).indexOf('service') < 0) continue;
+      for (var k = 0; k < state.units.length; k++) {
+        var u = state.units[k];
+        if (u.dead || u.owner !== b.owner || u.hp >= u.maxHp) continue;
+        if (u.def.tab !== 'vehicles') continue;
+        if (U.dist(u.x, u.y, b.cx, b.cy) > 3.4) continue;
+        var heal = Math.min(9, u.maxHp - u.hp);
+        var cost = heal * 0.12;
+        if (!Sim.spend(state, b.owner, cost)) continue;
+        u.hp += heal;
+      }
+    }
+  }
 
   // =====================================================================
   // Build system
@@ -870,6 +1066,8 @@
   Sim.canPlace = function (state, playerIdx, typeId, tx, ty) {
     var def = Rules.get(typeId);
     if (!def || def.kind !== 'building') return { ok: false, reason: 'Invalid', reasonKey: 'invalid' };
+    tx = Math.floor(tx);
+    ty = Math.floor(ty);
     var map = state.map;
     if (tx < 0 || ty < 0 || tx + def.w > map.w || ty + def.h > map.h) {
       return { ok: false, reason: 'Outside the map', reasonKey: 'outsideMap' };
@@ -887,21 +1085,17 @@
         if (map.ore[i] > 0) return { ok: false, reason: 'Cannot build on ore', reasonKey: 'ore' };
       }
     }
-    // must touch (or be very close to) an existing friendly structure
-    var touching = false;
-    for (y = -1; y <= def.h && !touching; y++) {
-      for (x = -1; x <= def.w; x++) {
-        if (x >= 0 && x < def.w && y >= 0 && y < def.h) continue;
-        var bx = tx + x, by = ty + y;
-        if (!map.inside(bx, by)) continue;
-        if (map.occ[map.idx(bx, by)]) {
-          var owner = buildingOwnerAt(state, bx, by);
-          if (owner === playerIdx) { touching = true; break; }
-        }
-      }
+    // 只要在自己基地范围内就能放：离任一自有建筑的格子间距 <= BUILD_RADIUS
+    // （默认 5 格，不需要紧贴；想改规则只改 Rules.BUILD_RADIUS）
+    var bestGap = 999;
+    for (var bi = 0; bi < state.buildings.length; bi++) {
+      var ob = state.buildings[bi];
+      if (ob.dead || ob.owner !== playerIdx) continue;
+      var gap = rectGap(tx, ty, def.w, def.h, ob.x, ob.y, ob.w, ob.h);
+      if (gap < bestGap) bestGap = gap;
     }
-    if (!touching) {
-      return { ok: false, reason: 'Must be built next to your base', reasonKey: 'notAdjacent' };
+    if (bestGap > Rules.BUILD_RADIUS) {
+      return { ok: false, reason: 'Too far from your base', reasonKey: 'tooFar', gap: bestGap };
     }
     // Never drop a building on top of units - that would trap them.
     var boxR = Math.max(def.w, def.h) * 0.75 + 1;
@@ -925,6 +1119,14 @@
     }
     return -1;
   }
+
+  /** 两个矩形（格子）之间的 Chebyshev 间距：相邻或重叠时为 0。 */
+  function rectGap(ax, ay, aw, ah, bx, by, bw, bh) {
+    var dx = Math.max(bx - (ax + aw - 1), ax - (bx + bw - 1), 0);
+    var dy = Math.max(by - (ay + ah - 1), ay - (by + bh - 1), 0);
+    return Math.max(dx, dy);
+  }
+  Sim.rectGap = rectGap;
 
   Sim.placeBuilding = function (state, playerIdx, typeId, tx, ty) {
     var check = Sim.canPlace(state, playerIdx, typeId, tx, ty);
@@ -1082,6 +1284,9 @@
         if (u.def.abilities && u.def.abilities.indexOf('capture') >= 0 && target.kind === 'building' && target.owner !== playerIdx) {
           u.order = { type: 'capture', targetId: target.id };
         }
+        if (u.def.abilities && u.def.abilities.indexOf('infiltrate') >= 0 && target.kind === 'building' && target.owner !== playerIdx) {
+          u.order = { type: 'infiltrate', targetId: target.id };
+        }
         u.state = 'idle';
       } else if (order.type === 'capture') {
         if (!target) continue;
@@ -1166,6 +1371,8 @@
       var tp = entityPoint(t);
       var d = U.dist(p.x, p.y, tp.x, tp.y);
       if (d > range) continue;
+      // 伪装成树的幻影坦克要靠近到贴脸才会被发现
+      if (t.disguised && d > 1.6) continue;
       if (t.kind === 'building' && !t.complete) d += 0.5;
       if (!losTo(state, p.x, p.y, t)) continue;
       var score = d;
@@ -1206,7 +1413,8 @@
       if (Math.abs(U.angleDiff(e.turret, want)) > 0.30) return false;
     }
     e.cooldown = weapon.rof * rank.rofMul;
-    var dmg = weapon.damage * rank.dmg;
+    if (e.disguised) { e.disguised = false; e.stillTicks = 0; }   // 开火即暴露
+    var dmg = weapon.damage * rank.dmg * (e.chargeBonus || 1);
     var muzzle;
     if (e.kind === 'unit' && e.def.turret) {
       var len = (e.def.turretLength || 0.55);
@@ -1258,6 +1466,12 @@
 
   function applyDamage(state, target, amount, warhead, source, sourceOwner) {
     if (!target || target.dead) return 0;
+    // 铁幕：短时间内免疫全部伤害
+    if (target.invulnUntil && state.tick < target.invulnUntil) {
+      addEffect(state, 'ironHit', target.x !== undefined ? target.x : target.cx,
+        target.y !== undefined ? target.y : target.cy, 6, { owner: target.owner });
+      return 0;
+    }
     var mult = Rules.warheadMultiplier(warhead, target.def.armor);
     if (target.kind === 'building' && !target.complete) mult *= 1.25;
     var dmg = amount * mult;
@@ -1314,17 +1528,19 @@
     }
   }
 
-  function splashDamage(state, x, y, radius, amount, warhead, owner, excludeId) {
+  function splashDamage(state, x, y, radius, amount, warhead, owner, excludeId, hitAllies) {
     var near = queryNear(state, x, y, radius);
     for (var i = 0; i < near.length; i++) {
       var t = near[i];
-      if (t.dead || t.owner === owner) continue;
+      if (t.dead) continue;
+      if (!hitAllies && t.owner === owner) continue;
       if (excludeId && t.id === excludeId) continue;
       if (!Rules.canWarheadHit(warhead, t)) continue;
       var p = entityPoint(t);
       var d = U.dist(p.x, p.y, x, y);
       if (d > radius) continue;
       var falloff = 1 - 0.7 * U.clamp(d / radius, 0, 1);
+      if (hitAllies && t.owner === owner && warhead !== 'he') continue;
       applyDamage(state, t, amount * falloff, warhead, null, owner);
     }
   }
@@ -1536,6 +1752,31 @@
     // Miners run their own state machine.
     if (u.def.capacity) { updateHarvester(state, u); return; }
 
+    // 幻影坦克：静止 2 秒后伪装成一棵树，敌人不会主动攻击它
+    if ((u.def.abilities || []).indexOf('disguise') >= 0) {
+      if (u.path || u.cooldown > 2) { u.stillTicks = 0; u.disguised = false; }
+      else {
+        u.stillTicks = (u.stillTicks || 0) + 1;
+        if (u.stillTicks > 2 * HZ) u.disguised = true;
+      }
+    }
+
+    // 间谍：潜入敌方建筑
+    if (u.order && u.order.type === 'infiltrate') {
+      var ib = Sim.byId(state, u.order.targetId);
+      if (!ib || ib.owner === u.owner) { u.order = { type: 'guard', x: u.x, y: u.y }; clearPath(u); }
+      else {
+        var ip = entityPoint(ib);
+        if (U.dist(u.x, u.y, ip.x, ip.y) < Math.max(ib.w, ib.h) * 0.5 + 0.9) {
+          infiltrateBuilding(state, ib, u);
+          return;
+        }
+        if (!u.path || u.repathCooldown <= 0) computePath(state, u, ip.x, ip.y);
+        stepUnitMovement(state, u, 1 / HZ);
+        return;
+      }
+    }
+
     // Engineers
     if (u.order && u.order.type === 'capture') {
       var b = Sim.byId(state, u.order.targetId);
@@ -1671,6 +1912,37 @@
   }
   Sim.captureBuilding = captureBuilding;
 
+  /** 间谍潜入：不同建筑有不同效果（原版机制）。 */
+  function infiltrateBuilding(state, b, spy) {
+    var victim = state.players[b.owner];
+    var thief = state.players[spy.owner];
+    var tags = b.def.tags || [];
+    var result = '';
+    if (tags.indexOf('refinery') >= 0) {
+      var steal = Math.min(2000, Math.floor(victim.credits));
+      victim.credits -= steal;
+      Sim.earn(state, spy.owner, steal);
+      result = 'steal';
+    } else if (tags.indexOf('power') >= 0) {
+      victim.powerSabotageUntil = state.tick + 30 * HZ;
+      result = 'power';
+    } else if (tags.indexOf('factory') >= 0 || tags.indexOf('barracks') >= 0) {
+      for (var t = 0; t < Rules.TAB_ORDER.length; t++) {
+        var q = victim.queues[Rules.TAB_ORDER[t]];
+        for (var i = 0; i < q.length; i++) q[i].progress = 0;
+      }
+      result = 'production';
+    } else {
+      result = 'intel';
+    }
+    addEffect(state, 'capture', b.cx, b.cy, 30, { owner: spy.owner });
+    addEvent(state, { type: 'infiltrate', player: spy.owner, from: b.owner, result: result, typeId: b.type });
+    spy.dead = true;
+    spy.deathTick = state.tick;
+    updatePower(state);
+  }
+  Sim.infiltrateBuilding = infiltrateBuilding;
+
   // =====================================================================
   // Harvesting
   // =====================================================================
@@ -1680,6 +1952,23 @@
       if (u.path) return;
     }
     if (u.cooldown > 0) u.cooldown--;
+
+    // 武装矿车（苏军战争矿车）：一边采矿一边自卫
+    var gun = primaryWeapon(u);
+    if (gun) {
+      var gt = u.targetId ? Sim.byId(state, u.targetId) : null;
+      var gp = gt ? entityPoint(gt) : null;
+      if (gt && (gt.dead || gt.owner === u.owner || !canTarget(gun, gt) ||
+        U.dist(u.x, u.y, gp.x, gp.y) > gun.range)) gt = null;
+      if (!gt) gt = acquireTarget(state, u, gun, gun.range);
+      if (gt) {
+        u.targetId = gt.id;
+        turnTo(state, u, gt);
+        tryFire(state, u, gt, gun, gun.range);
+      } else {
+        u.targetId = 0;
+      }
+    }
 
     if (u.state === 'seek') {
       if (u.cargo >= u.def.capacity) { u.state = 'return'; return; }
@@ -1767,6 +2056,18 @@
         return;
       }
       if (u.cargo <= 0) { u.state = 'seek'; u.dockRef = 0; return; }
+
+      // 超时空矿车：满载后直接传送回精炼厂（原版盟军招牌机制）
+      if ((u.def.abilities || []).indexOf('chrono') >= 0 &&
+        U.dist(u.x, u.y, ref.dockX, ref.dockY) > 5 && (u.chronoCd || 0) <= state.tick) {
+        u.chronoCd = state.tick + 5 * HZ;
+        addEffect(state, 'chrono', u.x, u.y, 20, { owner: u.owner });
+        addEffect(state, 'chrono', ref.dockX, ref.dockY, 20, { owner: u.owner });
+        u.x = ref.dockX + (state.rng() - 0.5) * 0.6;
+        u.y = ref.dockY + 0.9;
+        u.path = null;
+        addEvent(state, { type: 'chronoJump', player: u.owner, x: u.x, y: u.y });
+      }
       var dock = { x: ref.dockX + u.dockSlot * 0.9, y: ref.dockY + 0.2 };
       var d = U.dist(u.x, u.y, dock.x, dock.y);
       var arrived = !u.path;
@@ -1783,7 +2084,8 @@
         u.unloadTimer++;
         u.path = null;
         if (u.unloadTimer >= 45) {
-          Sim.earn(state, u.owner, u.cargo);
+          var bonus = (state.players[u.owner] && state.players[u.owner].oreBonus) || 1;
+          Sim.earn(state, u.owner, Math.round(u.cargo * bonus));
           addEvent(state, { type: 'unload', player: u.owner, amount: u.cargo, x: ref.cx, y: ref.cy });
           u.cargo = 0;
           u.unloadTimer = 0;
@@ -1913,8 +2215,9 @@
           var miners = Sim.unitCount(state, b.owner, function (u) { return !!u.def.capacity; });
           if (miners === 0) {
             var spot = Sim.exitPoints(state, b)[0];
-            var m = spawnUnit(state, b.owner, 'harvester', spot.x, spot.y);
-            addEvent(state, { type: 'unitReady', player: b.owner, typeId: 'harvester', id: m.id, free: true });
+            var mtype = minerFor(state, b.owner);
+            var m = spawnUnit(state, b.owner, mtype, spot.x, spot.y);
+            addEvent(state, { type: 'unitReady', player: b.owner, typeId: mtype, id: m.id, free: true });
           }
         }
       }
@@ -1937,7 +2240,22 @@
     var p = state.players[b.owner];
     if (p.power.low) return;                      // defences go offline
     if (!b.complete) return;
-    var range = weapon.range;
+
+    // 磁暴步兵给磁暴线圈充能：射程 +35%、伤害 +50%（原版机制）
+    var charged = false;
+    if (b.type === 'soviet_tesla') {
+      for (var ci = 0; ci < state.units.length; ci++) {
+        var cu = state.units[ci];
+        if (cu.dead || cu.owner !== b.owner || cu.type !== 'tesla_trooper') continue;
+        if (U.dist(cu.x, cu.y, b.cx, b.cy) <= 2.4) { charged = true; break; }
+      }
+      if (charged !== !!b.charged) {
+        b.charged = charged;
+        addEvent(state, { type: 'coilCharged', player: b.owner, on: charged, x: b.cx, y: b.cy });
+      }
+    }
+    b.chargeBonus = charged ? 1.5 : 1;
+    var range = weapon.range * (charged ? 1.35 : 1);
     var target = b.targetId ? Sim.byId(state, b.targetId) : null;
     if (target && (target.dead || target.owner === b.owner || !canTarget(weapon, target))) {
       target = null; b.targetId = 0;
@@ -2034,6 +2352,9 @@
     }
     separateUnits(state);
     updateProjectiles(state);
+    updateSupport(state);
+    updateStorms(state);
+    updateDepots(state);
     updateOre(state);
     updateEffects(state);
     updatePower(state);
